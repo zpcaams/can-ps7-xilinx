@@ -10,5 +10,5 @@ KDIR := /home/jds/linux-3.3-digilent
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD)
 clean:
-	rm -rf *.o *.ko *.mod.c *.mod.o *.symvers *.order .tmp_versions *.cmd
+	rm -rf *.o *.ko *.mod.c *.mod.o *.symvers *.order *.tmp_versions *.cmd
 endif

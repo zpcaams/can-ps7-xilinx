@@ -1,0 +1,9 @@
+# ignore files for linux kernel module development
+*.o
+*.ko
+*.mod.c 
+*.mod.o 
+*.symvers 
+*.order 
+*.tmp_versions 
+*.cmd
