@@ -1,45 +1,16 @@
 /*
  * can-xilinx-ps7-of-platform.c
  *
- *  Created on: Dec 19, 2012
- *      Author: root
- */
-/*
- * Xilinx I2C bus driver for the PS I2C Interfaces.
+ * This is a generic driver for CAN PS7 on the Zynq platform for Zedboard.
+ * You need a ps7_can node definition in your flattened device tree
+ * source (DTS) file similar to:
  *
- * 2009-2011 (c) Xilinx, Inc.
- *
- * This program is free software; you can redistribute it
- * and/or modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation;
- * either version 2 of the License, or (at your option) any
- * later version.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the Free
- * Software Foundation, Inc., 675 Mass Ave, Cambridge, MA
- * 02139, USA.
- *
- *
- * Workaround in Receive Mode
- *	If there is only one message to be processed, then based on length of
- *	the message we set the HOLD bit.
- *	If the length is less than the FIFO depth, then we will directly
- *	receive a COMP interrupt and the transaction is done.
- *	If the length is more than the FIFO depth, then we enable the HOLD bit
- *	and write FIFO depth to the transfer size register.
- *	We will receive the DATA interrupt, we calculate the remaining bytes
- *	to receive and write to the transfer size register and we process the
- *	data in FIFO.
- *	In the meantime, we are receiving the complete interrupt also and the
- *	controller waits for the default timeout period before generating a stop
- *	condition even though the HOLD bit is set. So we are unable to generate
- *	the data interrupt again.
- *	To avoid this, we wrote the expected bytes to receive as FIFO depth + 1
- *	instead of FIFO depth. This generated the second DATA interrupt as there
- *	are still outstanding bytes to be received.
- *
- *	The bus hold flag logic provides support for repeated start.
+ *		ps7_can_0: ps7-can@e0008000 {
+ *			compatible = "xlnx,ps7-can-1.00.a";
+ *			interrupts = < 0 28 4 >;
+ *			reg = < 0xe0008000 0x1000 >;
+ *		xlnx,can-clk-freq-hz = <0x5f5e100>;
+ *		} ;
  *
  */
 
@@ -59,53 +30,29 @@
 #include <linux/delay.h>
 #include <linux/can/dev.h>
 
+#include <linux/of_platform.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
+#include <asm/prom.h>
+
+#include "sja1000.h"
+
 #define DRIVER_NAME		"xcanps"
 
-/**
- * struct xi2cps - I2C device private data structure
- * @membase:		Base address of the I2C device
- * @adap:		I2C adapter instance
- * @p_msg:		Message pointer
- * @err_status:		Error status in Interrupt Status Register
- * @xfer_done:		Transfer complete status
- * @p_send_buf:		Pointer to transmit buffer
- * @p_recv_buf:		Pointer to receive buffer
- * @send_count:		Number of bytes still expected to send
- * @recv_count:		Number of bytes still expected to receive
- * @irq:		IRQ number
- * @cur_timeout:	The current timeout value used by the device
- * @input_clk:		Input clock to I2C controller
- * @bus_hold_flag:	Flag used in repeated start for clearing HOLD bit
- */
-struct xi2cps {
-	void __iomem *membase;
-	struct i2c_adapter adap;
-	struct i2c_msg	*p_msg;
-	int err_status;
-	struct completion xfer_done;
-	unsigned char *p_send_buf;
-	unsigned char *p_recv_buf;
-	int send_count;
-	int recv_count;
-	int irq;
-	int cur_timeout;
-	unsigned int input_clk;
-	unsigned int bus_hold_flag;
-};
+#define SJA1000_OFP_CAN_CLOCK  (16000000 / 2)
+#define SJA1000_OFP_OCR        OCR_TX0_PULLDOWN
+#define SJA1000_OFP_CDR        (CDR_CBP | CDR_CLK_OFF)
 
-/**
- * xi2cps_isr - Interrupt handler for the I2C device
- * @irq:	irq number for the I2C device
- * @ptr:	void pointer to xi2cps structure
- *
- * Returns IRQ_HANDLED always
- *
- * This function handles the data interrupt, transfer complete interrupt and
- * the error interrupts of the I2C device.
- */
-static irqreturn_t xi2cps_isr(int irq, void *ptr)
+
+static u32 sja1000_ofp_read_reg(const struct sja1000_priv *priv, int reg)
 {
-	return 0;
+	return ioread32(priv->reg_base + reg);
+}
+
+static void sja1000_ofp_write_reg(const struct sja1000_priv *priv,
+				  int reg, u32 val)
+{
+	iowrite32(val, (priv->reg_base + reg));
 }
 
 /************************/
@@ -124,74 +71,92 @@ static irqreturn_t xi2cps_isr(int irq, void *ptr)
  */
 static int __devinit xi2cps_probe(struct platform_device *pdev)
 {
-	struct resource *r_mem = NULL;
-	struct xi2cps *id;
-	int ret;
-	const unsigned int *prop;
+	struct device_node *np = pdev->dev.of_node;
+	struct net_device *dev;
+	struct sja1000_priv *priv;
+	struct resource res;
+	const u32 *prop;
+	int err, irq, res_size;
+	void __iomem *base;
 
-	printk("xcanps7 probe!\n");
-	/*
-	 * Allocate memory for xi2cps structure.
-	 * Initialize the structure to zero and set the platform data.
-	 * Obtain the resource base address from platform data and remap it.
-	 * Get the irq resource from platform data.Initialize the adapter
-	 * structure members and also xi2cps structure.
-	 */
-	id = kzalloc(sizeof(struct xi2cps), GFP_KERNEL);
-	if (!id) {
-		dev_err(&pdev->dev, "no mem for i2c private data\n");
-		return -ENOMEM;
-	}
-	memset((void *)id, 0, sizeof(struct xi2cps));
-	platform_set_drvdata(pdev, id);
+	printk("can ps7 probe\n");
 
-	r_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!r_mem) {
-		dev_err(&pdev->dev, "no mmio resources\n");
-		ret = -ENODEV;
-		goto err_free_mem;
+	err = of_address_to_resource(np, 0, &res);
+	if (err) {
+		dev_err(&pdev->dev, "invalid address\n");
+		return err;
 	}
 
-	id->membase = ioremap(r_mem->start, r_mem->end - r_mem->start + 1);
-	if (id->membase == NULL) {
-		dev_err(&pdev->dev, "Couldn't ioremap memory at 0x%08lx\n",
-			(unsigned long)r_mem->start);
-		ret = -ENOMEM;
-		goto err_free_mem;
+	res_size = resource_size(&res);
+
+	base = ioremap(res.start, res_size);
+	if (!base) {
+		dev_err(&pdev->dev, "couldn't ioremap %pR\n", &res);
+		err = -ENOMEM;
+		goto exit_release_mem;
 	}
 
-	id->irq = platform_get_irq(pdev, 0);
-	if (id->irq < 0) {
-		dev_err(&pdev->dev, "no IRQ resource:%d\n", id->irq);
-		ret = -ENXIO;
-		goto err_unmap;
+	irq = irq_of_parse_and_map(np, 0);
+	if (irq == NO_IRQ) {
+		dev_err(&pdev->dev, "no irq found\n");
+		err = -ENODEV;
+		goto exit_unmap_mem;
 	}
 
-	prop = of_get_property(pdev->dev.of_node, "xlnx,can-clk-freq-hz", NULL);
+	dev = alloc_sja1000dev(0);
+	if (!dev) {
+		err = -ENOMEM;
+		goto exit_dispose_irq;
+	}
+
+	priv = netdev_priv(dev);
+
+	priv->read_reg = sja1000_ofp_read_reg;
+	priv->write_reg = sja1000_ofp_write_reg;
+
+	prop = of_get_property(np, "xlnx,can-clk-freq-hz", NULL);
 	if (prop)
-		id->input_clk = be32_to_cpup(prop);
+		priv->can.clock.freq = be32_to_cpup(prop);
 	else {
-		ret = -ENXIO;
 		dev_err(&pdev->dev, "couldn't determine input-clk\n");
-		goto err_unmap ;
+		goto exit_dispose_irq ;
 	}
 
-	if (request_irq(id->irq, xi2cps_isr, 0, DRIVER_NAME, id)) {
-		dev_err(&pdev->dev, "cannot get irq %d\n", id->irq);
-		ret = -EINVAL;
-		goto err_unmap;
-	}
+	priv->ocr |= OCR_TX0_PULLDOWN; /* default */
+	priv->cdr |= CDR_CLK_OFF; /* default */
 
-	printk("mem %x addressed to %x, irq %d requested\n input clock is %d!\n"
-				, r_mem->start, (u32)id->membase, id->irq, id->input_clk);
+	priv->irq_flags = IRQF_SHARED;
+	priv->reg_base = base;
+
+	dev->irq = irq;
+
+	dev_info(&pdev->dev,
+		 "reg_base=0x%p irq=%d \n clock=%d ocr=0x%02x cdr=0x%02x\n",
+		 priv->reg_base, dev->irq, priv->can.clock.freq,
+		 priv->ocr, priv->cdr);
+
+	dev_set_drvdata(&pdev->dev, dev);
+	SET_NETDEV_DEV(dev, &pdev->dev);
+
+//	err = register_sja1000dev(dev);
+//	if (err) {
+//		dev_err(&ofdev->dev, "registering %s failed (err=%d)\n",
+//			DRV_NAME, err);
+//		goto exit_free_sja1000;
+//	}
+
 	return 0;
 
-err_free_irq:
-	free_irq(id->irq, id);
-err_unmap:
-	iounmap(id->membase);
-err_free_mem:
-	return ret;
+exit_free_sja1000:
+	free_sja1000dev(dev);
+exit_dispose_irq:
+	irq_dispose_mapping(irq);
+exit_unmap_mem:
+	iounmap(base);
+exit_release_mem:
+	release_mem_region(res.start, res_size);
+
+	return err;
 }
 
 /**
@@ -204,14 +169,23 @@ err_free_mem:
  */
 static int __devexit xi2cps_remove(struct platform_device *pdev)
 {
-	struct xi2cps *id = platform_get_drvdata(pdev);
+	struct net_device *dev = dev_get_drvdata(&pdev->dev);
+	struct sja1000_priv *priv = netdev_priv(dev);
+	struct device_node *np = pdev->dev.of_node;
+	struct resource res;
 
-	printk("xcanps7 remorve!\n");
+	printk("can ps7 remove\n");
 
-	free_irq(id->irq, id);
-	iounmap(id->membase);
-	kfree(id);
-	platform_set_drvdata(pdev, NULL);
+	dev_set_drvdata(&pdev->dev, NULL);
+
+	//unregister_sja1000dev(dev);
+	free_sja1000dev(dev);
+	iounmap(priv->reg_base);
+	irq_dispose_mapping(dev->irq);
+
+	of_address_to_resource(np, 0, &res);
+	//release_mem_region(res.start, resource_size(&res));
+
 	return 0;
 }
 

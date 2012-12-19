@@ -3,7 +3,12 @@
 *.ko
 *.mod.c 
 *.mod.o 
-*.symvers 
-*.order 
+Modele.symvers 
+modules.order 
 *.tmp_versions 
 *.cmd
+# ignore files for eclipse project
+.cproject
+.project
+.settings/
+.tmp_versions/
