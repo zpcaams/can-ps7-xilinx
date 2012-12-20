@@ -1,7 +1,7 @@
 # Makefile2.6
 ifneq ($(KERNELRELEASE),)
 #kbuild syntax. dependency relationshsip of files and target modules are listed here.
-obj-m := can-xilinx-ps7-of-platform.o 
+obj-m := can-xilinx-ps7-of-platform.o can-xilinx-ps7.o 
 
 else
 PWD := $(shell pwd)
