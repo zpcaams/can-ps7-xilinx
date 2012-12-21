@@ -125,6 +125,7 @@ static int __devinit xcanps_probe(struct platform_device *pdev)
 
 	priv->irq_flags = IRQF_SHARED;
 	priv->reg_base = base;
+	priv->CanConfig.BaseAddr = (u32)base;
 
 	dev->irq = irq;
 
@@ -141,7 +142,6 @@ static int __devinit xcanps_probe(struct platform_device *pdev)
 			DRIVER_NAME, err);
 		goto exit_free_xcanps;
 	}
-	printk("can ps7 probe done\n");
 	return 0;
 
 exit_free_xcanps:
