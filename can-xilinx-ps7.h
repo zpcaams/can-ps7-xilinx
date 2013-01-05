@@ -1,29 +1,54 @@
 /*
- * xcanps.h -  CAN PS7 Zynq network device driver
- *
+ * @file can-xilinx-ps7.h
+ * The Xilinx CAN driver for Zynq CAN PS on the ZedBoard.
  */
+
 
 #ifndef CAN_XILINX_PS7_H	/* prevent circular inclusions */
 #define CAN_XILINX_PS7_H	/* by using protection macros */
 
 
 /***************************** Include Files *********************************/
-
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/types.h>
+#include <linux/fcntl.h>
+#include <linux/interrupt.h>
 #include <linux/irqreturn.h>
+#include <linux/ptrace.h>
+#include <linux/string.h>
+#include <linux/errno.h>
+#include <linux/netdevice.h>
+#include <linux/if_arp.h>
+#include <linux/if_ether.h>
+#include <linux/skbuff.h>
+#include <linux/delay.h>
+
+#include <linux/can.h>
 #include <linux/can/dev.h>
+#include <linux/can/error.h>
+
+#include <linux/io.h>
+#include <linux/platform_device.h>
+#include <linux/slab.h>
+
+#include <linux/of_platform.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
+#include <asm/prom.h>
 #include "xil_types.h"
 #include "xstatus.h"
-//#include <linux/can/platform/xcanps.h>
 
 /************************** Constant Definitions *****************************/
 
-#define SJA1000_ECHO_SKB_MAX	1 /* the SJA1000 has one TX buffer object */
+#define DRV_NAME		"xcanps"
 
-#define SJA1000_MAX_IRQ 20	/* max. number of interrupts handled in ISR */
+#define XCANPS_ECHO_SKB_MAX	64 /* the XCANPS has one TX buffer object */
 
-#define XCANPS_MAX_FRAME_SIZE_IN_WORDS (XCANPS_MAX_FRAME_SIZE / sizeof(u32))
-
-#define FRAME_DATA_LENGTH	8 /* Frame Data field length */
+#define XCANPS_MAX_FRAME_SIZE_IN_WORDS \
+	(XCANPS_MAX_FRAME_SIZE / sizeof(u32))
 
 /** @name Register offsets for the CAN. Each register is 32 bits.
  *  @{
@@ -279,48 +304,7 @@
 #define XCANPS_HANDLER_EVENT  4 /**< Handler type for all other interrupts */
 /* @} */
 
-/****************************************************************************/
-/**
-*
-* This macro reads the given register.
-*
-* @param	BaseAddr is the base address of the device.
-* @param	RegOffset is the register offset to be read.
-*
-* @return	The 32-bit value of the register
-*
-* @note		None.
-*
-*****************************************************************************/
-#define XCanPs_ReadReg(BaseAddr, RegOffset) \
-		ioread32((BaseAddr) + (RegOffset))
-
-/****************************************************************************/
-/**
-*
-* This macro writes the given register.
-*
-* @param	BaseAddr is the base address of the device.
-* @param	RegOffset is the register offset to be written.
-* @param	Data is the 32-bit value to write to the register.
-*
-* @return	None.
-*
-* @note		None.
-*
-*****************************************************************************/
-#define XCanPs_WriteReg(BaseAddr, RegOffset, Data) \
-		iowrite32((Data), (BaseAddr) + (RegOffset))
-
-
 /**************************** Type Definitions *******************************/
-/**
- * This typedef contains configuration information for a device.
- */
-typedef struct {
-	u16 DeviceId;		/**< Unique ID of device */
-	u32 BaseAddr;		/**< Register base address */
-} XCanPs_Config;
 
 /******************************************************************************/
 /**
@@ -359,33 +343,23 @@ typedef void (*XCanPs_ErrorHandler) (void *CallBackRef, u32 ErrorMask);
 typedef void (*XCanPs_EventHandler) (void *CallBackRef, u32 Mask);
 
 /*
- * Flags for xcanpspriv.flags
- */
-#define SJA1000_CUSTOM_IRQ_HANDLER 0x1
-
-/*
  * SJA1000 private data structure
  */
 struct xcanps_priv {
 	struct can_priv can;	/* must be the first member */
 	int open_time;
+	void __iomem *BaseAddr;		/**< Register base address */
 	struct sk_buff *echo_skb;
 
 	/* the lower-layer is responsible for appropriate locking */
-	u32 (*read_reg) (const struct xcanps_priv *priv, int reg);
-	void (*write_reg) (const struct xcanps_priv *priv, int reg, u32 val);
 	void (*pre_irq) (const struct xcanps_priv *priv);
 	void (*post_irq) (const struct xcanps_priv *priv);
 
 	void *priv;		/* for board-specific data */
 	struct net_device *dev;
 
-	void __iomem *reg_base;	 /* ioremap'ed address to registers */
 	unsigned long irq_flags; /* for request_irq() */
 	spinlock_t cmdreg_lock;  /* lock for concurrent cmd register writes */
-
-	u16 flags;		/* custom mode flags */
-	XCanPs_Config CanConfig; 	/**< Device configuration */
 
 	/**
 	 * Callback and callback reference for TXOK interrupt.
@@ -413,6 +387,41 @@ struct xcanps_priv {
 	void *EventRef;
 };
 
+/***************** Macros (Inline Functions) Definitions *********************/
+
+/****************************************************************************/
+/**
+*
+* This macro reads the given register.
+*
+* @param	BaseAddr is the base address of the device.
+* @param	RegOffset is the register offset to be read.
+*
+* @return	The 32-bit value of the register
+*
+* @note		None.
+*
+*****************************************************************************/
+#define XCanPs_ReadReg(BaseAddr, RegOffset) \
+		ioread32((BaseAddr) + (RegOffset))
+
+/****************************************************************************/
+/**
+*
+* This macro writes the given register.
+*
+* @param	BaseAddr is the base address of the device.
+* @param	RegOffset is the register offset to be written.
+* @param	Data is the 32-bit value to write to the register.
+*
+* @return	None.
+*
+* @note		None.
+*
+*****************************************************************************/
+#define XCanPs_WriteReg(BaseAddr, RegOffset, Data) \
+		iowrite32((Data), (BaseAddr) + (RegOffset))
+
 /****************************************************************************/
 /**
 *
@@ -429,7 +438,7 @@ struct xcanps_priv {
 *
 *******************************************************************************/
 #define XCanPs_IsTxDone(InstancePtr) \
-	((XCanPs_ReadReg(((InstancePtr)->CanConfig.BaseAddr),		\
+	((XCanPs_ReadReg(((InstancePtr)->BaseAddr),		\
 		XCANPS_ISR_OFFSET) & XCANPS_IXR_TXOK_MASK) ? TRUE : FALSE)
 
 
@@ -449,7 +458,7 @@ struct xcanps_priv {
 *
 *****************************************************************************/
 #define XCanPs_IsTxFifoFull(InstancePtr) \
-	((XCanPs_ReadReg(((InstancePtr)->CanConfig.BaseAddr), 	\
+	((XCanPs_ReadReg(((InstancePtr)->BaseAddr), 	\
 		XCANPS_SR_OFFSET) & XCANPS_SR_TXFLL_MASK) ? TRUE : FALSE)
 
 
@@ -469,7 +478,7 @@ struct xcanps_priv {
 *
 *****************************************************************************/
 #define XCanPs_IsHighPriorityBufFull(InstancePtr) \
-	((XCanPs_ReadReg(((InstancePtr)->CanConfig.BaseAddr), 	\
+	((XCanPs_ReadReg(((InstancePtr)->BaseAddr), 	\
 		XCANPS_SR_OFFSET) & XCANPS_SR_TXBFLL_MASK) ? TRUE : FALSE)
 
 
@@ -489,7 +498,7 @@ struct xcanps_priv {
 *
 *****************************************************************************/
 #define XCanPs_IsRxEmpty(InstancePtr) \
-	((XCanPs_ReadReg(((InstancePtr)->CanConfig.BaseAddr), 	\
+	((XCanPs_ReadReg(((InstancePtr)->BaseAddr), 	\
 		XCANPS_ISR_OFFSET) & XCANPS_IXR_RXNEMP_MASK) ? FALSE : TRUE)
 
 
@@ -519,7 +528,7 @@ struct xcanps_priv {
 *
 *****************************************************************************/
 #define XCanPs_IsAcceptFilterBusy(InstancePtr) 		\
-	((XCanPs_ReadReg(((InstancePtr)->CanConfig.BaseAddr), 	\
+	((XCanPs_ReadReg(((InstancePtr)->BaseAddr), 	\
 		XCANPS_SR_OFFSET) & XCANPS_SR_ACFBSY_MASK) ? TRUE : FALSE)
 
 
@@ -590,7 +599,7 @@ struct xcanps_priv {
 *
 *****************************************************************************/
 #define XCanPs_ClearTimestamp(InstancePtr) 			\
-	XCanPs_WriteReg((InstancePtr)->CanConfig.BaseAddr, 		\
+	XCanPs_WriteReg((InstancePtr)->BaseAddr, 		\
 				XCANPS_TCR_OFFSET, XCANPS_TCR_CTS_MASK)
 
 
@@ -599,15 +608,11 @@ struct xcanps_priv {
 /*
  * Functions in xcanps.c
  */
-int XCanPs_CfgInitialize(struct xcanps_priv *InstancePtr, XCanPs_Config *ConfigPtr,
-				u32 EffectiveAddr);
 
 void XCanPs_Reset(struct xcanps_priv *InstancePtr);
 u8 XCanPs_GetMode(struct xcanps_priv *InstancePtr);
 void XCanPs_EnterMode(struct xcanps_priv *InstancePtr, u8 OperationMode);
 u32 XCanPs_GetStatus(struct xcanps_priv *InstancePtr);
-void XCanPs_GetBusErrorCounter(struct xcanps_priv *InstancePtr, u8 *RxErrorCount,
-				 u8 *TxErrorCount);
 u32 XCanPs_GetBusErrorStatus(struct xcanps_priv *InstancePtr);
 void XCanPs_ClearBusErrorStatus(struct xcanps_priv *InstancePtr, u32 Mask);
 int XCanPs_Send(struct xcanps_priv *InstancePtr, u32 *FramePtr);
@@ -648,8 +653,6 @@ void XCanPs_IntrHandler(void *InstancePtr);
 int XCanPs_SetHandler(struct xcanps_priv *InstancePtr, u32 HandlerType,
 			void *CallBackFunc, void *CallBackRef);
 
-struct net_device *alloc_xcanpsdev(int sizeof_priv);
-void free_xcanpsdev(struct net_device *dev);
 int register_xcanpsdev(struct net_device *dev);
 void unregister_xcanpsdev(struct net_device *dev);
 

@@ -5,32 +5,7 @@
  *      Author: root
  */
 
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/types.h>
-#include <linux/fcntl.h>
-#include <linux/interrupt.h>
-#include <linux/ptrace.h>
-#include <linux/string.h>
-#include <linux/errno.h>
-#include <linux/netdevice.h>
-#include <linux/if_arp.h>
-#include <linux/if_ether.h>
-#include <linux/skbuff.h>
-#include <linux/delay.h>
-
-#include <linux/can/dev.h>
-#include <linux/can/error.h>
-
 #include "can-xilinx-ps7.h"
-
-#define DRV_NAME "xcanps"
-
-MODULE_AUTHOR("Oliver Hartkopp <oliver.hartkopp@volkswagen.de>");
-MODULE_LICENSE("Dual BSD/GPL");
-MODULE_DESCRIPTION(DRV_NAME "CAN netdevice driver");
 
 static struct can_bittiming_const xcanps_bittiming_const = {
 	.name = DRV_NAME,
@@ -40,11 +15,12 @@ static struct can_bittiming_const xcanps_bittiming_const = {
 	.tseg2_max = 8,
 	.sjw_max = 4,
 	.brp_min = 1,
-	.brp_max = 64,
+	.brp_max = 256,
 	.brp_inc = 1,
 };
 
 static int xcanps_set_bittiming(struct net_device *dev);
+static void set_reset_mode(struct net_device *dev);
 
 static void SendHandler(void *CallBackRef);
 static void RecvHandler(void *CallBackRef);
@@ -78,7 +54,7 @@ void XCanPs_IntrEnable(struct xcanps_priv *InstancePtr, u32 Mask)
 	 */
 	IntrValue = XCanPs_IntrGetEnabled(InstancePtr);
 	IntrValue |= Mask & XCANPS_IXR_ALL;
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_IER_OFFSET, IntrValue);
 }
 
@@ -111,7 +87,7 @@ void XCanPs_IntrDisable(struct xcanps_priv *InstancePtr, u32 Mask)
 	 */
 	IntrValue = XCanPs_IntrGetEnabled(InstancePtr);
 	IntrValue &= ~Mask;
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_IER_OFFSET, IntrValue);
 }
 
@@ -134,7 +110,7 @@ u32 XCanPs_IntrGetEnabled(struct xcanps_priv *InstancePtr)
 //	Xil_AssertNonvoid(InstancePtr != NULL);
 //	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
-	return XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	return XCanPs_ReadReg(InstancePtr->BaseAddr,
 				XCANPS_IER_OFFSET);
 }
 
@@ -158,7 +134,7 @@ u32 XCanPs_IntrGetStatus(struct xcanps_priv *InstancePtr)
 //	Xil_AssertNonvoid(InstancePtr != NULL);
 //	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
-	return XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	return XCanPs_ReadReg(InstancePtr->BaseAddr,
 				XCANPS_ISR_OFFSET);
 }
 
@@ -191,7 +167,7 @@ void XCanPs_IntrClear(struct xcanps_priv *InstancePtr, u32 Mask)
 	 */
 	IntrValue = XCanPs_IntrGetStatus(InstancePtr);
 	IntrValue &= Mask;
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr, XCANPS_ICR_OFFSET,
+	XCanPs_WriteReg(InstancePtr->BaseAddr, XCANPS_ICR_OFFSET,
 				IntrValue);
 }
 
@@ -221,13 +197,14 @@ void XCanPs_IntrHandler(void *InstancePtr)
 	u32 PendingIntr;
 	u32 EventIntr;
 	u32 ErrorStatus;
-	struct xcanps_priv *CanPtr = (struct xcanps_priv *) InstancePtr;
-
-//	Xil_AssertVoid(CanPtr != NULL);
-//	Xil_AssertVoid(CanPtr->IsReady == XIL_COMPONENT_IS_READY);
+	struct net_device *dev = (struct net_device *)InstancePtr;
+	struct xcanps_priv *CanPtr = netdev_priv(dev);
 
 	PendingIntr = XCanPs_IntrGetStatus(CanPtr);
+	printk("PendingIntr = 0x%x\n", PendingIntr);
+
 	PendingIntr &= XCanPs_IntrGetEnabled(CanPtr);
+	printk("Enabled PendingIntr = 0x%x\n", PendingIntr);
 
 	/*
 	 * Clear all pending interrupts.
@@ -331,11 +308,10 @@ static void SendHandler(void *CallBackRef)
 	struct net_device *dev = (struct net_device *)CallBackRef;
 	struct net_device_stats *stats = &dev->stats;
 
+	printk("SendHandler");
 	/*
 	 * The frame was sent successfully. Notify the task context.
 	 */
-	//?? how long did I sent?
-	//stats->tx_bytes += priv->read_reg(priv, REG_FI) & 0xf;
 	stats->tx_packets++;
 	can_get_echo_skb(dev, 0);
 	netif_wake_queue(dev);
@@ -368,6 +344,8 @@ static void RecvHandler(void *CallBackRef)
 	int Status;
 	u32 RxFrame[XCANPS_MAX_FRAME_SIZE_IN_WORDS];
 	u8 *FramePtr;
+
+	printk("RecvHandler");
 
 	/* create zero'ed CAN frame buffer */
 	skb = alloc_can_skb(dev, &cf);
@@ -436,6 +414,8 @@ static void ErrorHandler(void *CallBackRef, u32 ErrorMask)
 {
 	struct net_device *dev = (struct net_device *)CallBackRef;
 
+	printk("ErrorHandler, Can will stop!\n");
+
 	if(ErrorMask & XCANPS_ESR_ACKER_MASK) {
 		/*
 		 * ACK Error handling code should be put here.
@@ -472,6 +452,11 @@ static void ErrorHandler(void *CallBackRef, u32 ErrorMask)
 		dev_err(dev->dev.parent, "CRC Error!\n");
 	}
 
+	/*
+	 * Stop Can if any error happened
+	 */
+	set_reset_mode(dev);
+
 }
 
 
@@ -507,20 +492,15 @@ static void ErrorHandler(void *CallBackRef, u32 ErrorMask)
 static void EventHandler(void *CallBackRef, u32 IntrMask)
 {
 	struct net_device *dev = (struct net_device *)CallBackRef;
-	struct xcanps_priv *InstancePtr = netdev_priv(dev);
+	//struct xcanps_priv *InstancePtr = netdev_priv(dev);
+
+	printk("EventHandler");
 
 	if (IntrMask & XCANPS_IXR_BSOFF_MASK) {
-		/*
-		 * Entering Bus off status interrupt requires
-		 * the CAN device be reset and reconfigured.
-		 */
-		XCanPs_Reset(InstancePtr);
-		xcanps_set_bittiming(dev);
-		/*
-		 * Set the threshold value for the Rx FIFO Watermark interrupt.
-		 */
-		XCanPs_SetRxIntrWatermark(InstancePtr, 4 - 1);
-		return;
+
+		set_reset_mode(dev);
+
+		dev_err(dev->dev.parent, " Bus off status Event!\n");
 	}
 
 	if(IntrMask & XCANPS_IXR_RXOFLW_MASK) {
@@ -560,6 +540,7 @@ static void EventHandler(void *CallBackRef, u32 IntrMask)
 		 * Code to handle Wake up from sleep mode
 		 * Interrupt should be put here.
 		 */
+
 		dev_err(dev->dev.parent, "Wake up from sleep mode Event!\n");
 	}
 
@@ -659,65 +640,6 @@ int XCanPs_SetHandler(struct xcanps_priv *InstancePtr, u32 HandlerType,
 }
 
 /*****************************************************************************/
-/*
-*
-* This function initializes a XCanPs instance/driver.
-*
-* The initialization entails:
-* - Initialize all members of the XCanPs structure.
-* - Reset the CAN device. The CAN device will enter Configuration Mode
-*   immediately after the reset is finished.
-*
-* @param	InstancePtr is a pointer to the XCanPs instance.
-* @param	ConfigPtr points to the XCanPs device configuration structure.
-* @param	EffectiveAddr is the device base address in the virtual memory
-*		address space. If the address translation is not used then the
-*		physical address is passed.
-*		Unexpected errors may occur if the address mapping is changed
-*		after this function is invoked.
-*
-* @return	XST_SUCCESS always.
-*
-* @note		None.
-*
-******************************************************************************/
-int XCanPs_CfgInitialize(struct xcanps_priv *InstancePtr, XCanPs_Config *ConfigPtr,
-				u32 EffectiveAddr)
-{
-
-//	Xil_AssertNonvoid(InstancePtr != NULL);
-//	Xil_AssertNonvoid(ConfigPtr != NULL);
-
-	/*
-	 * Set some default values for instance data, don't indicate the device
-	 * is ready to use until everything has been initialized successfully.
-	 */
-//	InstancePtr->IsReady = 0;
-	InstancePtr->CanConfig.BaseAddr = EffectiveAddr;
-	InstancePtr->CanConfig.DeviceId = ConfigPtr->DeviceId;
-
-	/*
-	 * Set all handlers to stub values, let user configure this data later.
-	 */
-//	InstancePtr->SendHandler = (XCanPs_SendRecvHandler) StubHandler;
-//	InstancePtr->RecvHandler = (XCanPs_SendRecvHandler) StubHandler;
-//	InstancePtr->ErrorHandler = (XCanPs_ErrorHandler) StubHandler;
-//	InstancePtr->EventHandler = (XCanPs_EventHandler) StubHandler;
-
-	/*
-	 * Indicate the component is now ready to use.
-	 */
-//	InstancePtr->IsReady = XIL_COMPONENT_IS_READY;
-
-	/*
-	 * Reset the device to get it into its initial state.
-	 */
-	XCanPs_Reset(InstancePtr);
-
-	return XST_SUCCESS;
-}
-
-/*****************************************************************************/
 /**
 *
 * This function resets the CAN device. Calling this function resets the device
@@ -747,7 +669,7 @@ void XCanPs_Reset(struct xcanps_priv *InstancePtr)
 //	Xil_AssertVoid(InstancePtr != NULL);
 //	Xil_AssertVoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr, XCANPS_SRR_OFFSET, \
+	XCanPs_WriteReg(InstancePtr->BaseAddr, XCANPS_SRR_OFFSET, \
 			   XCANPS_SRR_SRST_MASK);
 }
 
@@ -849,7 +771,7 @@ void XCanPs_EnterMode(struct xcanps_priv *InstancePtr, u8 OperationMode)
 		/*
 		 * Normal Mode ---> Sleep Mode
 		 */
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_MSR_OFFSET, XCANPS_MSR_SLEEP_MASK);
 		return;
 
@@ -858,7 +780,7 @@ void XCanPs_EnterMode(struct xcanps_priv *InstancePtr, u8 OperationMode)
 		/*
 		 * Sleep Mode ---> Normal Mode
 		 */
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 					XCANPS_MSR_OFFSET, 0);
 		return;
 	}
@@ -869,7 +791,7 @@ void XCanPs_EnterMode(struct xcanps_priv *InstancePtr, u8 OperationMode)
 	 * enter Configuration Mode before switching into the target operation
 	 * mode.
 	 */
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_SRR_OFFSET, 0);
 
 	/*
@@ -889,30 +811,30 @@ void XCanPs_EnterMode(struct xcanps_priv *InstancePtr, u8 OperationMode)
 		break;
 
 	case XCANPS_MODE_SLEEP:
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_MSR_OFFSET, XCANPS_MSR_SLEEP_MASK);
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_SRR_OFFSET, XCANPS_SRR_CEN_MASK);
 		break;
 
 	case XCANPS_MODE_NORMAL:
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_MSR_OFFSET, 0);
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_SRR_OFFSET, XCANPS_SRR_CEN_MASK);
 		break;
 
 	case XCANPS_MODE_LOOPBACK:
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_MSR_OFFSET, XCANPS_MSR_LBACK_MASK);
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_SRR_OFFSET, XCANPS_SRR_CEN_MASK);
 		break;
 
 	case XCANPS_MODE_SNOOP:
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_MSR_OFFSET, XCANPS_MSR_SNOOP_MASK);
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_SRR_OFFSET, XCANPS_SRR_CEN_MASK);
 		break;
 
@@ -939,43 +861,8 @@ u32 XCanPs_GetStatus(struct xcanps_priv *InstancePtr)
 //	Xil_AssertNonvoid(InstancePtr != NULL);
 //	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
-	return XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	return XCanPs_ReadReg(InstancePtr->BaseAddr,
 				XCANPS_SR_OFFSET);
-}
-
-/*****************************************************************************/
-/**
-*
-* This function reads Receive and Transmit error counters.
-*
-* @param	InstancePtr is a pointer to the XCanPs instance.
-* @param	RxErrorCount is a pointer to data in which the Receive Error
-*		counter value is returned.
-* @param	TxErrorCount is a pointer to data in which the Transmit Error
-*		counter value is returned.
-*
-* @return	None.
-*
-* @note		None.
-*
-******************************************************************************/
-void XCanPs_GetBusErrorCounter(struct xcanps_priv *InstancePtr, u8 *RxErrorCount,
-				 u8 *TxErrorCount)
-{
-	u32 ErrorCount;
-
-//	Xil_AssertVoid(InstancePtr != NULL);
-//	Xil_AssertVoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
-//	Xil_AssertVoid(RxErrorCount != NULL);
-//	Xil_AssertVoid(TxErrorCount != NULL);
-	/*
-	 * Read Error Counter Register and parse it.
-	 */
-	ErrorCount = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
-				XCANPS_ECR_OFFSET);
-	*RxErrorCount = (ErrorCount & XCANPS_ECR_REC_MASK) >>
-				XCANPS_ECR_REC_SHIFT;
-	*TxErrorCount = ErrorCount & XCANPS_ECR_TEC_MASK;
 }
 
 /*****************************************************************************/
@@ -998,7 +885,7 @@ u32 XCanPs_GetBusErrorStatus(struct xcanps_priv *InstancePtr)
 //	Xil_AssertNonvoid(InstancePtr != NULL);
 //	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
-	return XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	return XCanPs_ReadReg(InstancePtr->BaseAddr,
 				XCANPS_ESR_OFFSET);
 }
 
@@ -1024,7 +911,7 @@ void XCanPs_ClearBusErrorStatus(struct xcanps_priv *InstancePtr, u32 Mask)
 //	Xil_AssertVoid(InstancePtr != NULL);
 //	Xil_AssertVoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_ESR_OFFSET, Mask);
 }
 
@@ -1062,13 +949,13 @@ int XCanPs_Send(struct xcanps_priv *InstancePtr, u32 *FramePtr)
 	/*
 	 * Write IDR, DLC, Data Word 1 and Data Word 2 to the CAN device.
 	 */
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_TXFIFO_ID_OFFSET, FramePtr[0]);
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_TXFIFO_DLC_OFFSET, FramePtr[1]);
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_TXFIFO_DW1_OFFSET, FramePtr[2]);
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_TXFIFO_DW2_OFFSET, FramePtr[3]);
 
 	return XST_SUCCESS;
@@ -1107,13 +994,13 @@ int XCanPs_Recv(struct xcanps_priv *InstancePtr, u32 *FramePtr)
 	/*
 	 * Read IDR, DLC, Data Word 1 and Data Word 2 from the CAN device.
 	 */
-	FramePtr[0] = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	FramePtr[0] = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					XCANPS_RXFIFO_ID_OFFSET);
-	FramePtr[1] = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	FramePtr[1] = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					XCANPS_RXFIFO_DLC_OFFSET);
-	FramePtr[2] = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	FramePtr[2] = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					XCANPS_RXFIFO_DW1_OFFSET);
-	FramePtr[3] = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	FramePtr[3] = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					XCANPS_RXFIFO_DW2_OFFSET);
 
 	/*
@@ -1163,13 +1050,13 @@ int XCanPs_SendHighPriority(struct xcanps_priv *InstancePtr, u32 *FramePtr)
 	/*
 	 * Write IDR, DLC, Data Word 1 and Data Word 2 to the CAN device.
 	 */
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_TXHPB_ID_OFFSET, FramePtr[0]);
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_TXHPB_DLC_OFFSET, FramePtr[1]);
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_TXHPB_DW1_OFFSET, FramePtr[2]);
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_TXHPB_DW2_OFFSET, FramePtr[3]);
 
 	return XST_SUCCESS;
@@ -1204,11 +1091,11 @@ void XCanPs_AcceptFilterEnable(struct xcanps_priv *InstancePtr, u32 FilterIndexe
 	/*
 	 *  Calculate the new value and write to AFR.
 	 */
-	EnabledFilters =  XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	EnabledFilters =  XCanPs_ReadReg(InstancePtr->BaseAddr,
 						XCANPS_AFR_OFFSET);
 	EnabledFilters |= FilterIndexes;
 	EnabledFilters &= XCANPS_AFR_UAF_ALL_MASK;
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr, XCANPS_AFR_OFFSET,
+	XCanPs_WriteReg(InstancePtr->BaseAddr, XCANPS_AFR_OFFSET,
 			EnabledFilters);
 }
 
@@ -1243,10 +1130,10 @@ void XCanPs_AcceptFilterDisable(struct xcanps_priv *InstancePtr, u32 FilterIndex
 	/*
 	 *  Calculate the new value and write to AFR.
 	 */
-	EnabledFilters = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	EnabledFilters = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					XCANPS_AFR_OFFSET);
 	EnabledFilters &= XCANPS_AFR_UAF_ALL_MASK & (~FilterIndexes);
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr, XCANPS_AFR_OFFSET,
+	XCanPs_WriteReg(InstancePtr->BaseAddr, XCANPS_AFR_OFFSET,
 			   EnabledFilters);
 }
 
@@ -1271,7 +1158,7 @@ u32 XCanPs_AcceptFilterGetEnabled(struct xcanps_priv *InstancePtr)
 //	Xil_AssertNonvoid(InstancePtr != NULL);
 //	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
-	return XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	return XCanPs_ReadReg(InstancePtr->BaseAddr,
 				XCANPS_AFR_OFFSET);
 
 }
@@ -1339,30 +1226,30 @@ int XCanPs_AcceptFilterSet(struct xcanps_priv *InstancePtr, u32 FilterIndex,
 	switch (FilterIndex) {
 	case XCANPS_AFR_UAF1_MASK:	/* Acceptance Filter No. 1 */
 
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_AFMR1_OFFSET, MaskValue);
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_AFIR1_OFFSET, IdValue);
 		break;
 
 	case XCANPS_AFR_UAF2_MASK:	/* Acceptance Filter No. 2 */
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_AFMR2_OFFSET, MaskValue);
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_AFIR2_OFFSET, IdValue);
 		break;
 
 	case XCANPS_AFR_UAF3_MASK:	/* Acceptance Filter No. 3 */
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_AFMR3_OFFSET, MaskValue);
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_AFIR3_OFFSET, IdValue);
 		break;
 
 	case XCANPS_AFR_UAF4_MASK:	/* Acceptance Filter No. 4 */
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_AFMR4_OFFSET, MaskValue);
-		XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+		XCanPs_WriteReg(InstancePtr->BaseAddr,
 				XCANPS_AFIR4_OFFSET, IdValue);
 		break;
 	}
@@ -1408,30 +1295,30 @@ void XCanPs_AcceptFilterGet(struct xcanps_priv *InstancePtr, u32 FilterIndex,
 	 */
 	switch (FilterIndex) {
 	case XCANPS_AFR_UAF1_MASK:	/* Acceptance Filter No. 1 */
-		*MaskValue = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+		*MaskValue = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					  XCANPS_AFMR1_OFFSET);
-		*IdValue = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+		*IdValue = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					  XCANPS_AFIR1_OFFSET);
 		break;
 
 	case XCANPS_AFR_UAF2_MASK:	/* Acceptance Filter No. 2 */
-		*MaskValue = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+		*MaskValue = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					  XCANPS_AFMR2_OFFSET);
-		*IdValue = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+		*IdValue = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					  XCANPS_AFIR2_OFFSET);
 		break;
 
 	case XCANPS_AFR_UAF3_MASK:	/* Acceptance Filter No. 3 */
-		*MaskValue = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+		*MaskValue = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					  XCANPS_AFMR3_OFFSET);
-		*IdValue = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+		*IdValue = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					  XCANPS_AFIR3_OFFSET);
 		break;
 
 	case XCANPS_AFR_UAF4_MASK:	/* Acceptance Filter No. 4 */
-		*MaskValue = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+		*MaskValue = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					  XCANPS_AFMR4_OFFSET);
-		*IdValue = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+		*IdValue = XCanPs_ReadReg(InstancePtr->BaseAddr,
 					  XCANPS_AFIR4_OFFSET);
 		break;
 	}
@@ -1462,14 +1349,11 @@ void XCanPs_AcceptFilterGet(struct xcanps_priv *InstancePtr, u32 FilterIndex,
 ******************************************************************************/
 int XCanPs_SetBaudRatePrescaler(struct xcanps_priv *InstancePtr, u8 Prescaler)
 {
-//	Xil_AssertNonvoid(InstancePtr != NULL);
-//	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
-
 	if (XCanPs_GetMode(InstancePtr) != XCANPS_MODE_CONFIG) {
 		return XST_FAILURE;
 	}
 
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr, XCANPS_BRPR_OFFSET,
+	XCanPs_WriteReg(InstancePtr->BaseAddr, XCANPS_BRPR_OFFSET,
 				(u32)Prescaler);
 
 	return XST_SUCCESS;
@@ -1496,7 +1380,7 @@ u8 XCanPs_GetBaudRatePrescaler(struct xcanps_priv *InstancePtr)
 //	Xil_AssertNonvoid(InstancePtr != NULL);
 //	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
-	return (u8) XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	return (u8) XCanPs_ReadReg(InstancePtr->BaseAddr,
 					XCANPS_BRPR_OFFSET);
 
 }
@@ -1549,7 +1433,7 @@ int XCanPs_SetBitTiming(struct xcanps_priv *InstancePtr, u8 SyncJumpWidth,
 	Value |= (((u32) SyncJumpWidth) << XCANPS_BTR_SJW_SHIFT) &
 		XCANPS_BTR_SJW_MASK;
 
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_BTR_OFFSET, Value);
 
 	return XST_SUCCESS;
@@ -1587,7 +1471,7 @@ void XCanPs_GetBitTiming(struct xcanps_priv *InstancePtr, u8 *SyncJumpWidth,
 //	Xil_AssertVoid(TimeSegment2 != NULL);
 //	Xil_AssertVoid(TimeSegment1 != NULL);
 
-	Value = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	Value = XCanPs_ReadReg(InstancePtr->BaseAddr,
 				XCANPS_BTR_OFFSET);
 
 	*TimeSegment1 = (u8) (Value & XCANPS_BTR_TS1_MASK);
@@ -1627,12 +1511,12 @@ int XCanPs_SetRxIntrWatermark(struct xcanps_priv *InstancePtr, u8 Threshold)
 	if (XCanPs_GetMode(InstancePtr) != XCANPS_MODE_CONFIG)
 		return XST_FAILURE;
 
-	ThrReg = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	ThrReg = XCanPs_ReadReg(InstancePtr->BaseAddr,
 			XCANPS_WIR_OFFSET);
 
 	ThrReg &= XCANPS_WIR_EW_MASK;
 	ThrReg |= ((u32)Threshold & XCANPS_WIR_FW_MASK);
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_WIR_OFFSET, ThrReg);
 
 	return XST_SUCCESS;
@@ -1658,7 +1542,7 @@ u8 XCanPs_GetRxIntrWatermark(struct xcanps_priv *InstancePtr)
 //	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
 
-	return (u8) (XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	return (u8) (XCanPs_ReadReg(InstancePtr->BaseAddr,
 					XCANPS_WIR_OFFSET) &
 					XCANPS_WIR_FW_MASK);
 }
@@ -1692,13 +1576,13 @@ int XCanPs_SetTxIntrWatermark(struct xcanps_priv *InstancePtr, u8 Threshold)
 	if (XCanPs_GetMode(InstancePtr) != XCANPS_MODE_CONFIG)
 		return XST_FAILURE;
 
-	ThrReg = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	ThrReg = XCanPs_ReadReg(InstancePtr->BaseAddr,
 			XCANPS_WIR_OFFSET);
 
 	ThrReg &= XCANPS_WIR_FW_MASK;
 	ThrReg |= ((u32)(Threshold << XCANPS_WIR_EW_SHIFT)
 			& XCANPS_WIR_EW_MASK);
-	XCanPs_WriteReg(InstancePtr->CanConfig.BaseAddr,
+	XCanPs_WriteReg(InstancePtr->BaseAddr,
 			XCANPS_WIR_OFFSET, ThrReg);
 
 	return XST_SUCCESS;
@@ -1723,7 +1607,7 @@ u8 XCanPs_GetTxIntrWatermark(struct xcanps_priv *InstancePtr)
 //	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
 
-	return (u8) ((XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	return (u8) ((XCanPs_ReadReg(InstancePtr->BaseAddr,
 				XCANPS_WIR_OFFSET) & XCANPS_WIR_EW_MASK) >>
 					XCANPS_WIR_EW_SHIFT);
 }
@@ -1860,6 +1744,7 @@ static void set_reset_mode(struct net_device *dev)
 
 	XCanPs_IntrDisable(InstancePtr, XCANPS_IXR_ALL);
 	XCanPs_Reset(InstancePtr);
+	InstancePtr->can.state = CAN_STATE_STOPPED;
 	dev_info(dev->dev.parent, "set_reset_mode\n");
 }
 
@@ -1873,10 +1758,11 @@ static void set_normal_mode(struct net_device *dev)
 		dev_err(dev->dev.parent, "XCanPs_SelfTest failed!\n");
 		return;
 	}
+
 	/*
-	 * Set the threshold value for the Rx FIFO Watermark interrupt.
+	 * config bittiming
 	 */
-	XCanPs_SetRxIntrWatermark(InstancePtr, 4 - 1);
+	xcanps_set_bittiming(dev);
 
 	/*
 	 * Set the interrupt handlers.
@@ -1893,22 +1779,27 @@ static void set_normal_mode(struct net_device *dev)
 	/*
 	 * Enable all interrupts in CAN device.
 	 */
-	XCanPs_IntrEnable(InstancePtr, XCANPS_IXR_ALL);
-
-	/*
-	 * Disable the Receive FIFO Not Empty Interrupt and the
-	 * New Message Received Interrupt.
-	 */
-	XCanPs_IntrDisable(InstancePtr,
-				XCANPS_IXR_RXNEMP_MASK |
-				XCANPS_IXR_RXOK_MASK);
+	XCanPs_IntrEnable(InstancePtr, XCANPS_IXR_WKUP_MASK
+			| XCANPS_IXR_SLP_MASK
+			| XCANPS_IXR_BSOFF_MASK
+			| XCANPS_IXR_ERROR_MASK
+			| XCANPS_IXR_RXOK_MASK
+			| XCANPS_IXR_TXOK_MASK
+			| XCANPS_IXR_ARBLST_MASK);
 
 	/*
 	 * Enter Normal Mode.
 	 */
-	XCanPs_EnterMode(InstancePtr, XCANPS_MODE_NORMAL);
-	while(XCanPs_GetMode(InstancePtr) != XCANPS_MODE_NORMAL);
-
+	if (InstancePtr->can.ctrlmode & CAN_CTRLMODE_LOOPBACK) {
+		XCanPs_EnterMode(InstancePtr, XCANPS_MODE_LOOPBACK);
+		while(XCanPs_GetMode(InstancePtr) != XCANPS_MODE_LOOPBACK);
+	} else if (InstancePtr->can.ctrlmode & CAN_CTRLMODE_LISTENONLY) {
+		XCanPs_EnterMode(InstancePtr, XCANPS_MODE_SNOOP);
+		while(XCanPs_GetMode(InstancePtr) != XCANPS_MODE_SNOOP);
+	} else {
+		XCanPs_EnterMode(InstancePtr, XCANPS_MODE_NORMAL);
+		while(XCanPs_GetMode(InstancePtr) != XCANPS_MODE_NORMAL);
+	}
 	InstancePtr->can.state = CAN_STATE_ERROR_ACTIVE;
 
 	dev_info(dev->dev.parent, "set_normal_mode\n");
@@ -1930,6 +1821,7 @@ static int xcanps_set_mode(struct net_device *dev, enum can_mode mode)
 {
 	struct xcanps_priv *InstancePtr = netdev_priv(dev);
 
+	dev_info(dev->dev.parent, "xcanps_set_mode\n");
 	if (!InstancePtr->open_time)
 		return -EINVAL;
 
@@ -1943,7 +1835,6 @@ static int xcanps_set_mode(struct net_device *dev, enum can_mode mode)
 	default:
 		return -EOPNOTSUPP;
 	}
-	dev_info(dev->dev.parent, "xcanps_set_mode\n");
 	return 0;
 }
 
@@ -1951,6 +1842,8 @@ static int xcanps_set_bittiming(struct net_device *dev)
 {
 	struct xcanps_priv *InstancePtr = netdev_priv(dev);
 	struct can_bittiming *bt = &InstancePtr->can.bittiming;
+	int Status;
+	u8 Prescaler, SyncJumpWidth, TimeSegment2, TimeSegment1;
 
 	/*
 	 * Enter Configuration Mode if the device is not currently in
@@ -1959,16 +1852,38 @@ static int xcanps_set_bittiming(struct net_device *dev)
 	XCanPs_EnterMode(InstancePtr, XCANPS_MODE_CONFIG);
 	while(XCanPs_GetMode(InstancePtr) != XCANPS_MODE_CONFIG);
 
-	/*
-	 * Setup Baud Rate Prescaler Register (BRPR) and
-	 * Bit Timing Register (BTR) .
-	 */
-	XCanPs_SetBaudRatePrescaler(InstancePtr, bt->brp);
-	XCanPs_SetBitTiming(InstancePtr, bt->sjw,
-					bt->phase_seg2,
-					bt->phase_seg1);
 
-	dev_info(dev->dev.parent, "xcanps_set_bittiming\n");
+	/*
+	 * The Baud rate Prescalar value in the Baud Rate Prescaler Register
+	 * needs to be set based on the input clock  frequency to the CAN core and
+	 * the desired CAN baud rate.
+	 * This value is for a 500 kbps baudrate assuming the CAN input clock frequency
+	 * is 100 MHz.
+	 *
+	 * tq = tosc*(BRP+1) = 10ns*(24+1) = 250ns(4MHz)
+	 */
+	Prescaler = 24;//bt->brp -1;	//25
+	Status = XCanPs_SetBaudRatePrescaler(InstancePtr, Prescaler);
+
+	/*
+	 * Timing parameters to be set in the Bit Timing Register (BTR).
+	 * These values are for a 500 kbps baudrate assuming the CAN input clock
+	 * frequency is 100 MHz.
+	 *
+	 * tTSEG1 = tq*(TSEG1+1) = tq*(pro_s+pha_s1) = tq*(3+3)
+	 * tTSEG2 = tq*(TSEG2+1) = tq*pha_s2 = tq*1
+	 * tSJW = tq*(SJW+1) = tq*((1-1)+1
+	 * t(Normal Bit Time) = tq*(sync+ts1+ts2) = tq*(6+1+1) = tq*8 = 2us(500kHz)
+	 */
+	SyncJumpWidth = bt->sjw -1;	//1
+	TimeSegment1 = bt->phase_seg1 + bt-> prop_seg - 1;	//6
+	TimeSegment2 = bt->phase_seg2 -1;	//1
+	Status = XCanPs_SetBitTiming(InstancePtr, SyncJumpWidth,
+			TimeSegment2, TimeSegment1);
+
+	dev_info(dev->dev.parent, "xcanps_set_bittiming, "
+			"Prescaler:%d, SyncJumpWidth:%d, TimeSegment1:%d, TimeSegment2:%d\n",
+			(Prescaler+1), (SyncJumpWidth+1), (TimeSegment1+1), (TimeSegment2+1));
 	return 0;
 }
 
@@ -1981,14 +1896,14 @@ static int xcanps_get_berr_counter(const struct net_device *dev,
 	/*
 	 * Read Error Counter Register and parse it.
 	 */
-	ErrorCount = XCanPs_ReadReg(InstancePtr->CanConfig.BaseAddr,
+	ErrorCount = XCanPs_ReadReg(InstancePtr->BaseAddr,
 				XCANPS_ECR_OFFSET);
 	bec->rxerr = (ErrorCount & XCANPS_ECR_REC_MASK) >>
 				XCANPS_ECR_REC_SHIFT;
 	bec->txerr = ErrorCount & XCANPS_ECR_TEC_MASK;
 
 	dev_info(dev->dev.parent,
-			"get_berr_counter rxerr=0x%02x txerr=0x%02x\n",
+			"get_berr_counter rxerr=%d txerr=%d\n",
 			bec->rxerr, bec->txerr);
 
 	return 0;
@@ -2004,6 +1919,7 @@ static netdev_tx_t xcanps_start_xmit(struct sk_buff *skb,
 					    struct net_device *dev)
 {
 	struct xcanps_priv *InstancePtr = netdev_priv(dev);
+	struct net_device_stats *stats = &dev->stats;
 	struct can_frame *cf = (struct can_frame *)skb->data;
 	int i;
 	int Status;
@@ -2030,6 +1946,8 @@ static netdev_tx_t xcanps_start_xmit(struct sk_buff *skb,
 		*FramePtr++ = cf->data[i];
 	}
 
+	can_put_echo_skb(skb, dev, 0);
+
 	/*
 	 * Now wait until the TX FIFO is not full and send the frame.
 	 */
@@ -2037,7 +1955,8 @@ static netdev_tx_t xcanps_start_xmit(struct sk_buff *skb,
 
 	Status = XCanPs_Send(InstancePtr, TxFrame);
 
-	can_put_echo_skb(skb, dev, 0);
+	/* tx_packets is incremented in flexcan_irq */
+	stats->tx_bytes +=  cf->can_dlc;
 
 	dev_info(dev->dev.parent, "xcanps_start_xmit\n");
 	return NETDEV_TX_OK;
@@ -2221,7 +2140,7 @@ irqreturn_t xcanps_interrupt(int irq, void *dev_id)
 	if (CanPtr->pre_irq)
 		CanPtr->pre_irq(CanPtr);
 
-	XCanPs_IntrHandler(CanPtr);
+	XCanPs_IntrHandler(dev);
 
 	//?? where is the instance of this func
 	if (CanPtr->post_irq)
@@ -2241,24 +2160,19 @@ static int xcanps_open(struct net_device *dev)
 	struct xcanps_priv *priv = netdev_priv(dev);
 	int err;
 
-	/* set chip into reset mode */
-	set_reset_mode(dev);
-
 	/* common open */
 	err = open_candev(dev);
 	if (err)
 		return err;
 
 	/* register interrupt handler, if not done by the device driver */
-	if (!(priv->flags & SJA1000_CUSTOM_IRQ_HANDLER)) {
-		err = request_irq(dev->irq, xcanps_interrupt, priv->irq_flags,
-				  dev->name, (void *)dev);
-		if (err) {
-			close_candev(dev);
-			return -EAGAIN;
-		}
+	err = request_irq(dev->irq, xcanps_interrupt, priv->irq_flags,
+			  dev->name, (void *)dev);
+	if (err) {
+		close_candev(dev);
+		return -EAGAIN;
 	}
-	/* init and start chi */
+
 	xcanps_start(dev);
 	priv->open_time = jiffies;
 
@@ -2274,53 +2188,15 @@ static int xcanps_close(struct net_device *dev)
 	netif_stop_queue(dev);
 	set_reset_mode(dev);
 
-	if (!(priv->flags & SJA1000_CUSTOM_IRQ_HANDLER))
-		free_irq(dev->irq, (void *)dev);
+	free_irq(dev->irq, (void *)dev);
 
 	close_candev(dev);
+	priv->can.state = CAN_STATE_STOPPED;
 
 	priv->open_time = 0;
 	dev_info(dev->dev.parent, "xcanps_close\n");
 	return 0;
 }
-
-struct net_device *alloc_xcanpsdev(int sizeof_priv)
-{
-	struct net_device *dev;
-	struct xcanps_priv *priv;
-
-	dev = alloc_candev(sizeof(struct xcanps_priv) + sizeof_priv,
-		SJA1000_ECHO_SKB_MAX);
-	if (!dev)
-		return NULL;
-
-	priv = netdev_priv(dev);
-
-	priv->dev = dev;
-	priv->can.bittiming_const = &xcanps_bittiming_const;
-	priv->can.do_set_bittiming = xcanps_set_bittiming;
-	priv->can.do_set_mode = xcanps_set_mode;
-	priv->can.do_get_berr_counter = xcanps_get_berr_counter;
-	priv->can.ctrlmode_supported = CAN_CTRLMODE_LOOPBACK
-			| CAN_CTRLMODE_LISTENONLY
-			| CAN_CTRLMODE_3_SAMPLES
-			| CAN_CTRLMODE_BERR_REPORTING;
-
-	spin_lock_init(&priv->cmdreg_lock);
-
-	if (sizeof_priv)
-		priv->priv = (void *)priv + sizeof(struct xcanps_priv);
-
-	return dev;
-}
-EXPORT_SYMBOL_GPL(alloc_xcanpsdev);
-
-void free_xcanpsdev(struct net_device *dev)
-{
-	free_candev(dev);
-	dev_info(dev->dev.parent, "free_xcanpsdev\n");
-}
-EXPORT_SYMBOL_GPL(free_xcanpsdev);
 
 static const struct net_device_ops xcanps_netdev_ops = {
        .ndo_open               = xcanps_open,
@@ -2330,17 +2206,8 @@ static const struct net_device_ops xcanps_netdev_ops = {
 
 int register_xcanpsdev(struct net_device *dev)
 {
-    dev->type  = ARPHRD_CAN; /* the netdevice hardware type */
-    dev->flags |= IFF_NOARP;  /* CAN has no arp */
-
-    dev->mtu   = sizeof(struct can_frame);
-
-	dev->flags |= IFF_ECHO;	/* we support local echo */
-	dev->netdev_ops = &xcanps_netdev_ops;
-
 	set_reset_mode(dev);
 	dev_info(dev->dev.parent, "register_xcanpsdev\n");
-
 	return register_candev(dev);
 }
 EXPORT_SYMBOL_GPL(register_xcanpsdev);
@@ -2353,18 +2220,160 @@ void unregister_xcanpsdev(struct net_device *dev)
 }
 EXPORT_SYMBOL_GPL(unregister_xcanpsdev);
 
-static __init int xcanps_init(void)
+static int __devinit xcanps_probe(struct platform_device *pdev)
 {
-	printk(KERN_INFO "%s CAN PS7 netdevice driver\n", DRV_NAME);
+	struct device_node *np = pdev->dev.of_node;
+	struct net_device *dev;
+	struct xcanps_priv *priv;
+	struct resource res;
+	void __iomem *base;
+	const u32 *prop;
+	int err, irq, res_size;
+	u32 clk;
+
+	err = of_address_to_resource(np, 0, &res);
+	if (err) {
+		dev_err(&pdev->dev, "invalid address\n");
+		return err;
+	}
+
+	res_size = resource_size(&res);
+
+	if (!request_mem_region(res.start, res_size, pdev->name)) {
+		dev_err(&pdev->dev, "couldn't request %pR\n", &res);
+		return -EBUSY;
+	}
+
+	base = ioremap(res.start, res_size);
+	if (!base) {
+		dev_err(&pdev->dev, "couldn't ioremap %pR\n", &res);
+		err = -ENOMEM;
+		goto exit_release_mem;
+	}
+
+	irq = irq_of_parse_and_map(np, 0);
+	if (irq == NO_IRQ) {
+		dev_err(&pdev->dev, "no irq found\n");
+		err = -ENODEV;
+		goto exit_unmap_mem;
+	}
+
+	prop = of_get_property(np, "xlnx,can-clk-freq-hz", NULL);
+	if (prop)
+		clk = be32_to_cpup(prop);
+	else {
+		dev_err(&pdev->dev, "couldn't determine input-clk\n");
+		goto exit_dispose_irq ;
+	}
+
+	dev = alloc_candev(sizeof(struct xcanps_priv), XCANPS_ECHO_SKB_MAX);
+	if (!dev) {
+		err = -ENOMEM;
+		goto exit_dispose_irq;
+	}
+
+	dev->netdev_ops = &xcanps_netdev_ops;
+	dev->flags |= IFF_ECHO;	/* we support local echo */
+	dev->irq = irq;
+
+	priv = netdev_priv(dev);
+	priv->irq_flags = IRQF_SHARED;
+	priv->BaseAddr = base;
+	priv->dev = dev;
+	priv->can.clock.freq = clk;
+	priv->can.bittiming_const = &xcanps_bittiming_const;
+	priv->can.do_set_bittiming = xcanps_set_bittiming;
+	priv->can.do_set_mode = xcanps_set_mode;
+	priv->can.do_get_berr_counter = xcanps_get_berr_counter;
+	priv->can.ctrlmode_supported = CAN_CTRLMODE_LOOPBACK
+			| CAN_CTRLMODE_LISTENONLY
+			| CAN_CTRLMODE_3_SAMPLES
+			| CAN_CTRLMODE_BERR_REPORTING;
+
+	spin_lock_init(&priv->cmdreg_lock);
+
+	dev_set_drvdata(&pdev->dev, dev);
+	SET_NETDEV_DEV(dev, &pdev->dev);
+
+	err = register_xcanpsdev(dev);
+	if (err) {
+		dev_err(&pdev->dev, "registering %s failed (err=%d)\n",
+				DRV_NAME, err);
+		goto exit_free_xcanps;
+	}
+
+	dev_info(&pdev->dev,
+		 "reg_base=0x%p irq=%d clock=%d\n",
+		 priv->BaseAddr, dev->irq, priv->can.clock.freq);
+
+	return 0;
+
+exit_free_xcanps:
+	free_candev(dev);
+exit_dispose_irq:
+	irq_dispose_mapping(irq);
+exit_unmap_mem:
+	iounmap(base);
+exit_release_mem:
+	release_mem_region(res.start, res_size);
+	return err;
+}
+
+static int __devexit xcanps_remove(struct platform_device *pdev)
+{
+	struct net_device *dev = dev_get_drvdata(&pdev->dev);
+	struct xcanps_priv *priv = netdev_priv(dev);
+	struct device_node *np = pdev->dev.of_node;
+	struct resource res;
+
+	unregister_xcanpsdev(dev);
+	dev_set_drvdata(&pdev->dev, NULL);
+	irq_dispose_mapping(dev->irq);
+	iounmap(priv->BaseAddr);
+	of_address_to_resource(np, 0, &res);
+	release_mem_region(res.start, resource_size(&res));
 
 	return 0;
 }
 
+static struct of_device_id xcanps_of_match[] __devinitdata = {
+	{ .compatible = "xlnx,ps7-can-1.00.a", },
+	{ /* end of table */}
+};
+MODULE_DEVICE_TABLE(of, xcanps_of_match);
+
+static struct platform_driver xcanps_drv = {
+	.driver = {
+		.name  = DRV_NAME,
+		.owner = THIS_MODULE,
+		.of_match_table = xcanps_of_match,
+	},
+	.probe  = xcanps_probe,
+	.remove = __devexit_p(xcanps_remove),
+};
+
+/**
+ * xcanps_init - Initial driver registration function
+ * Returns zero on success, otherwise negative error.
+ */
+static int __init xcanps_init(void)
+{
+	printk(KERN_INFO "%s netdevice driver\n", DRV_NAME);
+	return platform_driver_register(&xcanps_drv);
+}
 module_init(xcanps_init);
 
-static __exit void xcanps_exit(void)
+/**
+ * xcanps_exit - Driver Un-registration function
+ */
+static void __exit xcanps_exit(void)
 {
 	printk(KERN_INFO "%s: driver removed\n", DRV_NAME);
+	platform_driver_unregister(&xcanps_drv);
 }
-
 module_exit(xcanps_exit);
+
+
+MODULE_AUTHOR("ZhouPeng<zp_caams@163.com>");
+MODULE_DESCRIPTION("Xilinx PS CAN bus driver");
+MODULE_LICENSE("GPL");

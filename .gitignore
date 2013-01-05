@@ -1,12 +1,16 @@
 # ignore files for linux kernel module development
 *.o
 *.ko
-*.mod.c 
-*.mod.o 
-Modele.symvers 
-modules.order 
+
 *.tmp_versions 
 *.cmd
+
+*.mod.c 
+*.mod.o 
+
+*.order
+
+*.symvers 
 # ignore files for eclipse project
 .cproject
 .project

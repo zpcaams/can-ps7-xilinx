@@ -22,7 +22,10 @@
 
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
+
+#include <linux/can.h>
 #include <linux/can/dev.h>
+#include <linux/can/error.h>
 
 #include <linux/of_platform.h>
 #include <linux/of_address.h>
@@ -31,19 +34,6 @@
 
 #include "can-xilinx-ps7.h"
 
-#define DRIVER_NAME		"xcanps"
-
-static u32 xcanps_ofp_read_reg(const struct xcanps_priv *priv, int reg)
-{
-	return ioread32(priv->reg_base + reg);
-}
-
-static void xcanps_ofp_write_reg(const struct xcanps_priv *priv,
-				  int reg, u32 val)
-{
-	iowrite32(val, (priv->reg_base + reg));
-}
-
 static int __devexit xcanps_remove(struct platform_device *pdev)
 {
 	struct net_device *dev = dev_get_drvdata(&pdev->dev);
@@ -51,12 +41,10 @@ static int __devexit xcanps_remove(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	struct resource res;
 
-	printk("can ps7 remove\n");
-
 	dev_set_drvdata(&pdev->dev, NULL);
 	unregister_xcanpsdev(dev);
 	free_xcanpsdev(dev);
-	iounmap(priv->reg_base);
+	iounmap(priv->CanConfig.BaseAddr);
 	irq_dispose_mapping(dev->irq);
 
 	of_address_to_resource(np, 0, &res);
@@ -73,9 +61,8 @@ static int __devinit xcanps_probe(struct platform_device *pdev)
 	struct resource res;
 	const u32 *prop;
 	int err, irq, res_size;
+	u32 clk;
 	void __iomem *base;
-
-	printk("can ps7 probe\n");
 
 	err = of_address_to_resource(np, 0, &res);
 	if (err) {
@@ -110,28 +97,21 @@ static int __devinit xcanps_probe(struct platform_device *pdev)
 		goto exit_dispose_irq;
 	}
 
-	priv = netdev_priv(dev);
-
-	priv->read_reg = xcanps_ofp_read_reg;
-	priv->write_reg = xcanps_ofp_write_reg;
-
 	prop = of_get_property(np, "xlnx,can-clk-freq-hz", NULL);
 	if (prop)
-		priv->can.clock.freq = be32_to_cpup(prop);
+		clk = be32_to_cpup(prop);
 	else {
 		dev_err(&pdev->dev, "couldn't determine input-clk\n");
 		goto exit_dispose_irq ;
 	}
 
-	priv->irq_flags = IRQF_SHARED;
-	priv->reg_base = base;
-	priv->CanConfig.BaseAddr = (u32)base;
-
 	dev->irq = irq;
 
-	dev_info(&pdev->dev,
-		 "reg_base=0x%p irq=%d \n clock=%d\n",
-		 priv->reg_base, dev->irq, priv->can.clock.freq);
+	priv = netdev_priv(dev);
+	priv->irq_flags = IRQF_SHARED;
+	priv->CanConfig.BaseAddr = base;
+	priv->can.clock.freq = clk;
+
 
 	dev_set_drvdata(&pdev->dev, dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
@@ -142,6 +122,11 @@ static int __devinit xcanps_probe(struct platform_device *pdev)
 			DRIVER_NAME, err);
 		goto exit_free_xcanps;
 	}
+
+	dev_info(&pdev->dev,
+		 "reg_base=0x%p irq=%d clock=%d\n",
+		 priv->CanConfig.BaseAddr, dev->irq, priv->can.clock.freq);
+
 	return 0;
 
 exit_free_xcanps:
@@ -193,6 +178,3 @@ static void __exit xcanps_exit(void)
 module_init(xcanps_init);
 module_exit(xcanps_exit);
 
-MODULE_AUTHOR("ZhouPeng<zp_caams@163.com>");
-MODULE_DESCRIPTION("Xilinx PS CAN bus driver");
-MODULE_LICENSE("GPL");
