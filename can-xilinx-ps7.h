@@ -351,10 +351,6 @@ struct xcanps_priv {
 	void __iomem *BaseAddr;		/**< Register base address */
 	struct sk_buff *echo_skb;
 
-	/* the lower-layer is responsible for appropriate locking */
-	void (*pre_irq) (const struct xcanps_priv *priv);
-	void (*post_irq) (const struct xcanps_priv *priv);
-
 	void *priv;		/* for board-specific data */
 	struct net_device *dev;
 

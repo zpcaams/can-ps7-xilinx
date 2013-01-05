@@ -308,7 +308,6 @@ static void SendHandler(void *CallBackRef)
 	struct net_device *dev = (struct net_device *)CallBackRef;
 	struct net_device_stats *stats = &dev->stats;
 
-	printk("SendHandler");
 	/*
 	 * The frame was sent successfully. Notify the task context.
 	 */
@@ -345,16 +344,16 @@ static void RecvHandler(void *CallBackRef)
 	u32 RxFrame[XCANPS_MAX_FRAME_SIZE_IN_WORDS];
 	u8 *FramePtr;
 
-	printk("RecvHandler");
-
 	/* create zero'ed CAN frame buffer */
 	skb = alloc_can_skb(dev, &cf);
 	if (skb == NULL)
 		return;
 
 	Status = XCanPs_Recv(InstancePtr, RxFrame);
-	if (Status != XST_SUCCESS)
+	if (Status != XST_SUCCESS){
+		stats->rx_errors++;
 		return ;
+	}
 
 	/*
 	 * Substitute Remote Transmission Request ?
@@ -390,6 +389,8 @@ static void RecvHandler(void *CallBackRef)
 
 	stats->rx_packets++;
 	stats->rx_bytes += cf->can_dlc;
+
+	printk("new packet receive!");
 }
 
 
@@ -414,47 +415,48 @@ static void ErrorHandler(void *CallBackRef, u32 ErrorMask)
 {
 	struct net_device *dev = (struct net_device *)CallBackRef;
 
-	printk("ErrorHandler, Can will stop!\n");
-
 	if(ErrorMask & XCANPS_ESR_ACKER_MASK) {
 		/*
 		 * ACK Error handling code should be put here.
 		 */
 
-		dev_err(dev->dev.parent, "ACK Error!\n");
+		dev_err(dev->dev.parent, "ACK Error: Acknowledgment error!\n");
 	}
 
 	if(ErrorMask & XCANPS_ESR_BERR_MASK) {
 		/*
 		 * Bit Error handling code should be put here.
 		 */
-		dev_err(dev->dev.parent, "Bit Error!\n");
+		dev_err(dev->dev.parent, "Bit Error: the received bit is \n"
+				"not the same as the transmitted bit during bus communication!\n");
 	}
 
 	if(ErrorMask & XCANPS_ESR_STER_MASK) {
 		/*
 		 * Stuff Error handling code should be put here.
 		 */
-		dev_err(dev->dev.parent, "Stuff Error!\n");
+		dev_err(dev->dev.parent, "Stuff Error: there is a stuffing violation!\n");
 	}
 
 	if(ErrorMask & XCANPS_ESR_FMER_MASK) {
 		/*
 		 * Form Error handling code should be put here.
 		 */
-		dev_err(dev->dev.parent, "Form Error!\n");
+		dev_err(dev->dev.parent, "Form Error: an error in one of the fixed form fields \n"
+				" in the message frame!\n");
 	}
 
 	if(ErrorMask & XCANPS_ESR_CRCER_MASK) {
 		/*
 		 * CRC Error handling code should be put here.
 		 */
-		dev_err(dev->dev.parent, "CRC Error!\n");
+		dev_err(dev->dev.parent, "CRC Error: a CRC error has occurred!\n");
 	}
 
 	/*
 	 * Stop Can if any error happened
 	 */
+	dev_err(dev->dev.parent, "Error happened, CAN is stopped, check the cable, the board for reasons!\n");
 	set_reset_mode(dev);
 
 }
@@ -492,9 +494,8 @@ static void ErrorHandler(void *CallBackRef, u32 ErrorMask)
 static void EventHandler(void *CallBackRef, u32 IntrMask)
 {
 	struct net_device *dev = (struct net_device *)CallBackRef;
-	//struct xcanps_priv *InstancePtr = netdev_priv(dev);
-
-	printk("EventHandler");
+	struct xcanps_priv *priv = netdev_priv(dev);
+	struct net_device_stats *stats = &dev->stats;
 
 	if (IntrMask & XCANPS_IXR_BSOFF_MASK) {
 
@@ -508,6 +509,8 @@ static void EventHandler(void *CallBackRef, u32 IntrMask)
 		 * Code to handle RX FIFO Overflow
 		 * Interrupt should be put here.
 		 */
+		stats->rx_over_errors++;
+		stats->rx_errors++;
 		dev_err(dev->dev.parent, "RX FIFO Overflow Event!\n");
 	}
 
@@ -557,6 +560,8 @@ static void EventHandler(void *CallBackRef, u32 IntrMask)
 		 * Code to handle Lost bus arbitration
 		 * Interrupt should be put here.
 		 */
+		priv->can.can_stats.arbitration_lost++;
+		stats->tx_errors++;
 		dev_err(dev->dev.parent, "Lost bus arbitration Event!\n");
 	}
 }
@@ -1649,9 +1654,6 @@ int XCanPs_SelfTest(struct xcanps_priv *InstancePtr)
 	u32 TxFrame[XCANPS_MAX_FRAME_SIZE_IN_WORDS];
 	u32 RxFrame[XCANPS_MAX_FRAME_SIZE_IN_WORDS];
 
-//	Xil_AssertNonvoid(InstancePtr != NULL);
-//	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
-
 	XCanPs_Reset(InstancePtr);
 
 	/*
@@ -1748,19 +1750,12 @@ static void set_reset_mode(struct net_device *dev)
 	dev_info(dev->dev.parent, "set_reset_mode\n");
 }
 
-static void set_normal_mode(struct net_device *dev)
+static int set_normal_mode(struct net_device *dev)
 {
 	struct xcanps_priv *InstancePtr = netdev_priv(dev);
-	int Status;
-
-	Status = XCanPs_SelfTest(InstancePtr);
-	if (Status != XST_SUCCESS) {
-		dev_err(dev->dev.parent, "XCanPs_SelfTest failed!\n");
-		return;
-	}
 
 	/*
-	 * config bittiming
+	 * Config CAN bittiming
 	 */
 	xcanps_set_bittiming(dev);
 
@@ -1777,65 +1772,27 @@ static void set_normal_mode(struct net_device *dev)
 			(void *)EventHandler, (void *)dev);
 
 	/*
-	 * Enable all interrupts in CAN device.
+	 * Enable interrupts in CAN device.
 	 */
 	XCanPs_IntrEnable(InstancePtr, XCANPS_IXR_WKUP_MASK
 			| XCANPS_IXR_SLP_MASK
 			| XCANPS_IXR_BSOFF_MASK
 			| XCANPS_IXR_ERROR_MASK
 			| XCANPS_IXR_RXOK_MASK
+			| XCANPS_IXR_RXNEMP_MASK
 			| XCANPS_IXR_TXOK_MASK
 			| XCANPS_IXR_ARBLST_MASK);
 
 	/*
 	 * Enter Normal Mode.
 	 */
-	if (InstancePtr->can.ctrlmode & CAN_CTRLMODE_LOOPBACK) {
-		XCanPs_EnterMode(InstancePtr, XCANPS_MODE_LOOPBACK);
-		while(XCanPs_GetMode(InstancePtr) != XCANPS_MODE_LOOPBACK);
-	} else if (InstancePtr->can.ctrlmode & CAN_CTRLMODE_LISTENONLY) {
-		XCanPs_EnterMode(InstancePtr, XCANPS_MODE_SNOOP);
-		while(XCanPs_GetMode(InstancePtr) != XCANPS_MODE_SNOOP);
-	} else {
-		XCanPs_EnterMode(InstancePtr, XCANPS_MODE_NORMAL);
-		while(XCanPs_GetMode(InstancePtr) != XCANPS_MODE_NORMAL);
-	}
+	XCanPs_EnterMode(InstancePtr, XCANPS_MODE_NORMAL);
+	while(XCanPs_GetMode(InstancePtr) != XCANPS_MODE_NORMAL);
+
+
 	InstancePtr->can.state = CAN_STATE_ERROR_ACTIVE;
-
 	dev_info(dev->dev.parent, "set_normal_mode\n");
-}
-
-static void xcanps_start(struct net_device *dev)
-{
-	struct xcanps_priv *InstancePtr = netdev_priv(dev);
-
-	/* leave reset mode */
-	if (InstancePtr->can.state != CAN_STATE_STOPPED)
-		set_reset_mode(dev);
-
-	set_normal_mode(dev);
-	dev_info(dev->dev.parent, "xcanps_start\n");
-}
-
-static int xcanps_set_mode(struct net_device *dev, enum can_mode mode)
-{
-	struct xcanps_priv *InstancePtr = netdev_priv(dev);
-
-	dev_info(dev->dev.parent, "xcanps_set_mode\n");
-	if (!InstancePtr->open_time)
-		return -EINVAL;
-
-	switch (mode) {
-	case CAN_MODE_START:
-		xcanps_start(dev);
-		if (netif_queue_stopped(dev))
-			netif_wake_queue(dev);
-		break;
-
-	default:
-		return -EOPNOTSUPP;
-	}
-	return 0;
+	return XST_SUCCESS;
 }
 
 static int xcanps_set_bittiming(struct net_device *dev)
@@ -1902,9 +1859,9 @@ static int xcanps_get_berr_counter(const struct net_device *dev,
 				XCANPS_ECR_REC_SHIFT;
 	bec->txerr = ErrorCount & XCANPS_ECR_TEC_MASK;
 
-	dev_info(dev->dev.parent,
-			"get_berr_counter rxerr=%d txerr=%d\n",
-			bec->rxerr, bec->txerr);
+//	dev_info(dev->dev.parent,
+//			"get_berr_counter rxerr=%d txerr=%d\n",
+//			bec->rxerr, bec->txerr);
 
 	return 0;
 }
@@ -1938,217 +1895,130 @@ static netdev_tx_t xcanps_start_xmit(struct sk_buff *skb,
 	TxFrame[1] = (u32)XCanPs_CreateDlcValue((u32)cf->can_dlc);
 
 	/*
-	 * Now fill in the data field with known values so we can verify them
-	 * on receive.
+	 * Now fill in the data field.
 	 */
 	FramePtr = (u8 *)(&TxFrame[2]);
 	for (i = 0; i < cf->can_dlc; i++) {
 		*FramePtr++ = cf->data[i];
 	}
 
-	can_put_echo_skb(skb, dev, 0);
-
 	/*
-	 * Now wait until the TX FIFO is not full and send the frame.
+	 * Now send the frame.
 	 */
-	while (XCanPs_IsTxFifoFull(InstancePtr) == TRUE);
-
 	Status = XCanPs_Send(InstancePtr, TxFrame);
 
 	/* tx_packets is incremented in flexcan_irq */
 	stats->tx_bytes +=  cf->can_dlc;
 
+	can_put_echo_skb(skb, dev, 0);
+
 	dev_info(dev->dev.parent, "xcanps_start_xmit\n");
 	return NETDEV_TX_OK;
-}
-
-static void xcanps_rx(struct net_device *dev)
-{
-//	struct xcanps_priv *priv = netdev_priv(dev);
-//	struct net_device_stats *stats = &dev->stats;
-//	struct can_frame *cf;
-//	struct sk_buff *skb;
-//	uint8_t fi;
-//	uint8_t dreg;
-//	canid_t id;
-//	int i;
-//
-//	/* create zero'ed CAN frame buffer */
-//	skb = alloc_can_skb(dev, &cf);
-//	if (skb == NULL)
-//		return;
-//
-//	fi = priv->read_reg(priv, REG_FI);
-//
-//	if (fi & FI_FF) {
-//		/* extended frame format (EFF) */
-//		dreg = EFF_BUF;
-//		id = (priv->read_reg(priv, REG_ID1) << (5 + 16))
-//		    | (priv->read_reg(priv, REG_ID2) << (5 + 8))
-//		    | (priv->read_reg(priv, REG_ID3) << 5)
-//		    | (priv->read_reg(priv, REG_ID4) >> 3);
-//		id |= CAN_EFF_FLAG;
-//	} else {
-//		/* standard frame format (SFF) */
-//		dreg = SFF_BUF;
-//		id = (priv->read_reg(priv, REG_ID1) << 3)
-//		    | (priv->read_reg(priv, REG_ID2) >> 5);
-//	}
-//
-//	cf->can_dlc = get_can_dlc(fi & 0x0F);
-//	if (fi & FI_RTR) {
-//		id |= CAN_RTR_FLAG;
-//	} else {
-//		for (i = 0; i < cf->can_dlc; i++)
-//			cf->data[i] = priv->read_reg(priv, dreg++);
-//	}
-//
-//	cf->can_id = id;
-//
-//	/* release receive buffer */
-//	xcanps_write_cmdreg(priv, CMD_RRB);
-//
-//	netif_rx(skb);
-//
-//	stats->rx_packets++;
-//	stats->rx_bytes += cf->can_dlc;
-	printk("can rx\n");
-}
-
-static int xcanps_err(struct net_device *dev, uint8_t isrc, uint8_t status)
-{
-//	struct xcanps_priv *priv = netdev_priv(dev);
-//	struct net_device_stats *stats = &dev->stats;
-//	struct can_frame *cf;
-//	struct sk_buff *skb;
-//	enum can_state state = priv->can.state;
-//	uint8_t ecc, alc;
-//
-//	skb = alloc_can_err_skb(dev, &cf);
-//	if (skb == NULL)
-//		return -ENOMEM;
-//
-//	if (isrc & IRQ_DOI) {
-//		/* data overrun interrupt */
-//		dev_dbg(dev->dev.parent, "data overrun interrupt\n");
-//		cf->can_id |= CAN_ERR_CRTL;
-//		cf->data[1] = CAN_ERR_CRTL_RX_OVERFLOW;
-//		stats->rx_over_errors++;
-//		stats->rx_errors++;
-//		xcanps_write_cmdreg(priv, CMD_CDO);	/* clear bit */
-//	}
-//
-//	if (isrc & IRQ_EI) {
-//		/* error warning interrupt */
-//		dev_dbg(dev->dev.parent, "error warning interrupt\n");
-//
-//		if (status & SR_BS) {
-//			state = CAN_STATE_BUS_OFF;
-//			cf->can_id |= CAN_ERR_BUSOFF;
-//			can_bus_off(dev);
-//		} else if (status & SR_ES) {
-//			state = CAN_STATE_ERROR_WARNING;
-//		} else
-//			state = CAN_STATE_ERROR_ACTIVE;
-//	}
-//	if (isrc & IRQ_BEI) {
-//		/* bus error interrupt */
-//		priv->can.can_stats.bus_error++;
-//		stats->rx_errors++;
-//
-//		ecc = priv->read_reg(priv, REG_ECC);
-//
-//		cf->can_id |= CAN_ERR_PROT | CAN_ERR_BUSERROR;
-//
-//		switch (ecc & ECC_MASK) {
-//		case ECC_BIT:
-//			cf->data[2] |= CAN_ERR_PROT_BIT;
-//			break;
-//		case ECC_FORM:
-//			cf->data[2] |= CAN_ERR_PROT_FORM;
-//			break;
-//		case ECC_STUFF:
-//			cf->data[2] |= CAN_ERR_PROT_STUFF;
-//			break;
-//		default:
-//			cf->data[2] |= CAN_ERR_PROT_UNSPEC;
-//			cf->data[3] = ecc & ECC_SEG;
-//			break;
-//		}
-//		/* Error occurred during transmission? */
-//		if ((ecc & ECC_DIR) == 0)
-//			cf->data[2] |= CAN_ERR_PROT_TX;
-//	}
-//	if (isrc & IRQ_EPI) {
-//		/* error passive interrupt */
-//		dev_dbg(dev->dev.parent, "error passive interrupt\n");
-//		if (status & SR_ES)
-//			state = CAN_STATE_ERROR_PASSIVE;
-//		else
-//			state = CAN_STATE_ERROR_ACTIVE;
-//	}
-//	if (isrc & IRQ_ALI) {
-//		/* arbitration lost interrupt */
-//		dev_dbg(dev->dev.parent, "arbitration lost interrupt\n");
-//		alc = priv->read_reg(priv, REG_ALC);
-//		priv->can.can_stats.arbitration_lost++;
-//		stats->tx_errors++;
-//		cf->can_id |= CAN_ERR_LOSTARB;
-//		cf->data[0] = alc & 0x1f;
-//	}
-//
-//	if (state != priv->can.state && (state == CAN_STATE_ERROR_WARNING ||
-//					 state == CAN_STATE_ERROR_PASSIVE)) {
-//		uint8_t rxerr = priv->read_reg(priv, REG_RXERR);
-//		uint8_t txerr = priv->read_reg(priv, REG_TXERR);
-//		cf->can_id |= CAN_ERR_CRTL;
-//		if (state == CAN_STATE_ERROR_WARNING) {
-//			priv->can.can_stats.error_warning++;
-//			cf->data[1] = (txerr > rxerr) ?
-//				CAN_ERR_CRTL_TX_WARNING :
-//				CAN_ERR_CRTL_RX_WARNING;
-//		} else {
-//			priv->can.can_stats.error_passive++;
-//			cf->data[1] = (txerr > rxerr) ?
-//				CAN_ERR_CRTL_TX_PASSIVE :
-//				CAN_ERR_CRTL_RX_PASSIVE;
-//		}
-//		cf->data[6] = txerr;
-//		cf->data[7] = rxerr;
-//	}
-//
-//	priv->can.state = state;
-//
-//	netif_rx(skb);
-//
-//	stats->rx_packets++;
-//	stats->rx_bytes += cf->can_dlc;
-	printk("can err\n");
-	return 0;
 }
 
 irqreturn_t xcanps_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *)dev_id;
 	struct xcanps_priv *CanPtr = netdev_priv(dev);
+	u32 PendingIntr;
+	u32 EventIntr;
+	u32 ErrorStatus;
 
 	/* Shared interrupts and IRQ off? */
 	if(XCanPs_IntrGetEnabled(CanPtr) == 0)
 		return IRQ_NONE;
 
-	//?? where is the instance of this func
-	if (CanPtr->pre_irq)
-		CanPtr->pre_irq(CanPtr);
+	PendingIntr = XCanPs_IntrGetStatus(CanPtr);
+	//printk("PendingIntr = 0x%x\n", PendingIntr);
 
-	XCanPs_IntrHandler(dev);
+	PendingIntr &= XCanPs_IntrGetEnabled(CanPtr);
+	//printk("Enabled PendingIntr = 0x%x\n", PendingIntr);
 
-	//?? where is the instance of this func
-	if (CanPtr->post_irq)
-		CanPtr->post_irq(CanPtr);
+	/*
+	 * Clear all enabled pending interrupts.
+	 * Rising Edge interrupt
+	 */
+	XCanPs_IntrClear(CanPtr, PendingIntr);
 
-//	if (n >= SJA1000_MAX_IRQ)
-//		dev_dbg(dev->dev.parent, "%d messages handled in ISR", n);
+	/*
+	 * An error interrupt is occurring.
+	 */
+	if ((PendingIntr & XCANPS_IXR_ERROR_MASK)) {
+		dev_info(dev->dev.parent, "error\n");
+		ErrorStatus = XCanPs_GetBusErrorStatus(CanPtr);
+		CanPtr->ErrorHandler(CanPtr->ErrorRef, ErrorStatus);
 
+		/*
+		 * Clear Error Status Register.
+		 */
+		XCanPs_ClearBusErrorStatus(CanPtr, ErrorStatus);
+	}
+
+	/*
+	 * Check if any following event interrupt is pending:
+	 *	  - RX FIFO Overflow
+	 *	  - RX FIFO Underflow
+	 *	  - TX High Priority Buffer full
+	 *	  - TX FIFO Full
+	 *	  - Wake up from sleep mode
+	 *	  - Enter sleep mode
+	 *	  - Enter Bus off status
+	 *	  - Arbitration is lost
+	 *
+	 * If so, call event callback provided by upper level.
+	 */
+	EventIntr = PendingIntr & (XCANPS_IXR_RXOFLW_MASK |
+				XCANPS_IXR_RXUFLW_MASK |
+				XCANPS_IXR_TXBFLL_MASK |
+				XCANPS_IXR_TXFLL_MASK |
+				XCANPS_IXR_WKUP_MASK |
+				XCANPS_IXR_SLP_MASK |
+				XCANPS_IXR_BSOFF_MASK |
+				XCANPS_IXR_ARBLST_MASK);
+	if (EventIntr) {
+		dev_info(dev->dev.parent, "event\n");
+		CanPtr->EventHandler(CanPtr->EventRef, EventIntr);
+
+		if ((EventIntr & XCANPS_IXR_BSOFF_MASK)) {
+			/*
+			 * Event callback should reset whole device if "Enter
+			 * Bus Off Status" interrupt occurred. All pending
+			 * interrupts are cleared and no further checking and
+			 * handling of other interrupts is needed any more.
+			 */
+			//return IRQ_HANDLED;
+		}
+	}
+
+
+	if ((PendingIntr & (XCANPS_IXR_RXFWMFLL_MASK |
+			XCANPS_IXR_RXNEMP_MASK))) {
+
+		/*
+		 * This case happens when
+		 * A number of frames depending on the Rx FIFO Watermark
+		 * threshold are received.
+		 * And  also when frame was received and is sitting in RX FIFO.
+		 *
+		 * XCANPS_IXR_RXOK_MASK is not used because the bit is set
+		 * just once even if there are multiple frames sitting
+		 * in the RX FIFO.
+		 *
+		 * XCANPS_IXR_RXNEMP_MASK is used because the bit can be
+		 * set again and again automatically as long as there is
+		 * at least one frame in RX FIFO.
+		 */
+		dev_info(dev->dev.parent, "receive\n");
+		CanPtr->RecvHandler(CanPtr->RecvRef);
+	}
+
+	/*
+	 * A frame was transmitted successfully.
+	 */
+	if ((PendingIntr & XCANPS_IXR_TXOK_MASK)) {
+		dev_info(dev->dev.parent, "transmit\n");
+		CanPtr->SendHandler(CanPtr->SendRef);
+	}
 
 	dev_info(dev->dev.parent, "xcanps_interrupt\n");
 	return IRQ_HANDLED;
@@ -2173,9 +2043,12 @@ static int xcanps_open(struct net_device *dev)
 		return -EAGAIN;
 	}
 
-	xcanps_start(dev);
 	priv->open_time = jiffies;
 
+	err = set_normal_mode(dev);
+	if (err != XST_SUCCESS) {
+
+	}
 	netif_start_queue(dev);
 	dev_info(dev->dev.parent, "xcanps_open\n");
 	return 0;
@@ -2185,15 +2058,12 @@ static int xcanps_close(struct net_device *dev)
 {
 	struct xcanps_priv *priv = netdev_priv(dev);
 
+	priv->open_time = 0;
 	netif_stop_queue(dev);
 	set_reset_mode(dev);
-
 	free_irq(dev->irq, (void *)dev);
-
 	close_candev(dev);
-	priv->can.state = CAN_STATE_STOPPED;
 
-	priv->open_time = 0;
 	dev_info(dev->dev.parent, "xcanps_close\n");
 	return 0;
 }
@@ -2203,22 +2073,6 @@ static const struct net_device_ops xcanps_netdev_ops = {
        .ndo_stop               = xcanps_close,
        .ndo_start_xmit         = xcanps_start_xmit,
 };
-
-int register_xcanpsdev(struct net_device *dev)
-{
-	set_reset_mode(dev);
-	dev_info(dev->dev.parent, "register_xcanpsdev\n");
-	return register_candev(dev);
-}
-EXPORT_SYMBOL_GPL(register_xcanpsdev);
-
-void unregister_xcanpsdev(struct net_device *dev)
-{
-	set_reset_mode(dev);
-	unregister_candev(dev);
-	dev_info(dev->dev.parent, "unregister_xcanpsdev\n");
-}
-EXPORT_SYMBOL_GPL(unregister_xcanpsdev);
 
 static int __devinit xcanps_probe(struct platform_device *pdev)
 {
@@ -2282,23 +2136,31 @@ static int __devinit xcanps_probe(struct platform_device *pdev)
 	priv->dev = dev;
 	priv->can.clock.freq = clk;
 	priv->can.bittiming_const = &xcanps_bittiming_const;
-	priv->can.do_set_bittiming = xcanps_set_bittiming;
-	priv->can.do_set_mode = xcanps_set_mode;
+	//	priv->can.do_set_bittiming = xcanps_set_bittiming;
+	//	priv->can.do_set_mode = xcanps_set_mode;
+	//	priv->can.do_get_state = xcanps_get_state;
 	priv->can.do_get_berr_counter = xcanps_get_berr_counter;
-	priv->can.ctrlmode_supported = CAN_CTRLMODE_LOOPBACK
-			| CAN_CTRLMODE_LISTENONLY
-			| CAN_CTRLMODE_3_SAMPLES
-			| CAN_CTRLMODE_BERR_REPORTING;
-
-	spin_lock_init(&priv->cmdreg_lock);
+	//	priv->can.ctrlmode_supported = CAN_CTRLMODE_LOOPBACK
+	//			| CAN_CTRLMODE_LISTENONLY
+	//			| CAN_CTRLMODE_3_SAMPLES
+	//			| CAN_CTRLMODE_BERR_REPORTING;
+	//	spin_lock_init(&priv->cmdreg_lock);
 
 	dev_set_drvdata(&pdev->dev, dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
-	err = register_xcanpsdev(dev);
+	err = register_candev(dev);
 	if (err) {
 		dev_err(&pdev->dev, "registering %s failed (err=%d)\n",
 				DRV_NAME, err);
+		goto exit_free_xcanps;
+	}
+
+	//hardware setup, only run self test here
+	err = XCanPs_SelfTest(priv);
+	if (err != XST_SUCCESS) {
+		dev_err(dev->dev.parent, "XCanPs_SelfTest failed!\n");
+		err = -ENODEV;
 		goto exit_free_xcanps;
 	}
 
@@ -2326,7 +2188,8 @@ static int __devexit xcanps_remove(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	struct resource res;
 
-	unregister_xcanpsdev(dev);
+	set_reset_mode(dev);
+	unregister_candev(dev);
 	dev_set_drvdata(&pdev->dev, NULL);
 	irq_dispose_mapping(dev->irq);
 	iounmap(priv->BaseAddr);
