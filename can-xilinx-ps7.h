@@ -7,7 +7,6 @@
 #ifndef CAN_XILINX_PS7_H	/* prevent circular inclusions */
 #define CAN_XILINX_PS7_H	/* by using protection macros */
 
-
 /***************************** Include Files *********************************/
 #include <linux/module.h>
 #include <linux/init.h>

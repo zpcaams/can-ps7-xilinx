@@ -338,7 +338,6 @@ static void RecvHandler(void *CallBackRef)
 	struct net_device_stats *stats = &dev->stats;
 	struct can_frame *cf;
 	struct sk_buff *skb;
-	canid_t id;
 	int i;
 	int Status;
 	u32 RxFrame[XCANPS_MAX_FRAME_SIZE_IN_WORDS];
@@ -355,16 +354,9 @@ static void RecvHandler(void *CallBackRef)
 		return ;
 	}
 
-	/*
-	 * Substitute Remote Transmission Request ?
-	 * Get id
-	 */
-	if(((RxFrame[0] | XCANPS_IDR_SRR_MASK) >> XCANPS_IDR_SRR_SHIFT)){
-		id = ((RxFrame[0] | XCANPS_IDR_ID1_MASK) >> 3) +
-			((RxFrame[0] | XCANPS_IDR_ID2_MASK) >> XCANPS_IDR_ID2_SHIFT);
-		id |= CAN_EFF_FLAG;
-	} else {
-		id = ((RxFrame[0] | XCANPS_IDR_ID1_MASK) >> XCANPS_IDR_ID1_SHIFT);
+	dev_info(dev->dev.parent, "xcanps_received data:\n");
+	for(i=0; i<4; i++) {
+		dev_info(dev->dev.parent, "RxFrame%d:%x\n", i, RxFrame[i]);
 	}
 
 	/* Get dlc */
@@ -372,25 +364,23 @@ static void RecvHandler(void *CallBackRef)
 			XCANPS_DLCR_DLC_SHIFT);
 
 	/*
-	 * Remote Transmission Request ?
+	 * Now fill in the data field with received values .
 	 */
-	if(RxFrame[0] | XCANPS_IDR_RTR_MASK){
-		id |= CAN_RTR_FLAG;
-	} else {
-		FramePtr = (u8 *)(&RxFrame[2]);
-		for(i=0; i<cf->can_dlc; i++) {
-			cf->data[i] = *FramePtr++;
-		}
+	FramePtr = (u8 *)(&RxFrame[2]);
+	for (i = 0; i < cf->can_dlc; i++) {
+		*(cf->data + i) = *(FramePtr + i);
 	}
 
-	cf->can_id = id;
+	for(i=0; i<8; i++) {
+		dev_info(dev->dev.parent, "cf->data[%d]:%x\n", i, cf->data[i]);
+	}
+	cf->can_id = RxFrame[0];
 
 	netif_rx(skb);
 
 	stats->rx_packets++;
 	stats->rx_bytes += cf->can_dlc;
 
-	printk("new packet receive!");
 }
 
 
@@ -988,9 +978,6 @@ int XCanPs_Send(struct xcanps_priv *InstancePtr, u32 *FramePtr)
 ******************************************************************************/
 int XCanPs_Recv(struct xcanps_priv *InstancePtr, u32 *FramePtr)
 {
-//	Xil_AssertNonvoid(InstancePtr != NULL);
-//	Xil_AssertNonvoid(FramePtr != NULL);
-//	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
 
 	if (XCanPs_IsRxEmpty(InstancePtr) == TRUE) {
 		return XST_NO_DATA;
