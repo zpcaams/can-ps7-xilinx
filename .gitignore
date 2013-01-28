@@ -1,5 +1,4 @@
 # ignore files for linux kernel module development
-*.o
 *.ko
 
 *.tmp_versions 
@@ -16,3 +15,21 @@
 .project
 .settings/
 .tmp_versions/
+# Object files
+
+*.o
+
+# Libraries
+*.lib
+*.a
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
