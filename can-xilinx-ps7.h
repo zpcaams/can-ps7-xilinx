@@ -1,8 +1,24 @@
-/*
- * @file can-xilinx-ps7.h
- * The Xilinx CAN driver for Zynq CAN PS on the ZedBoard.
- */
+/******************************************************************************
+	This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
 
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+    fieldrobot  Copyright (C) 2013  ZhouPeng CAAMS	<zp_caams@163.com>
+
+    @file can-xilinx-ps7.h
+    Xilinx Zynq CAN PS driver for ZED board.
+    This CAN dirver is modified from driver/net/sja100 in linux kernel code and
+    xcanps_intr_example from xilinx sdk.
+******************************************************************************/
 
 #ifndef CAN_XILINX_PS7_H	/* prevent circular inclusions */
 #define CAN_XILINX_PS7_H	/* by using protection macros */
@@ -24,6 +40,7 @@
 #include <linux/if_ether.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>
+#include <linux/errno.h>
 
 #include <linux/can.h>
 #include <linux/can/dev.h>

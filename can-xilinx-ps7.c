@@ -1,9 +1,33 @@
-/*
- * can-xilinx-ps7.c
- *
- *  Created on: Dec 19, 2012
- *      Author: root
- */
+/******************************************************************************
+	This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+    fieldrobot  Copyright (C) 2013  ZhouPeng CAAMS	<zp_caams@163.com>
+
+    @file can-xilinx-ps7.c
+    Xilinx Zynq CAN PS driver for ZED board.
+    This CAN dirver is modified from driver/net/sja100 in linux kernel code and
+    xcanps_intr_example from xilinx sdk.
+
+	You need a ps7_can node definition in your flattened device tree
+	source (DTS) file similar to:
+	ps7_can_0: ps7-can@e0008000 {
+		compatible = "xlnx,ps7-can-1.00.a";
+		interrupts = < 0 28 4 >;
+		reg = < 0xe0008000 0x1000 >;
+		xlnx,can-clk-freq-hz = <0x5f5e100>;
+	} ;
+******************************************************************************/
 
 #include "can-xilinx-ps7.h"
 
@@ -201,10 +225,8 @@ void XCanPs_IntrHandler(void *InstancePtr)
 	struct xcanps_priv *CanPtr = netdev_priv(dev);
 
 	PendingIntr = XCanPs_IntrGetStatus(CanPtr);
-	printk("PendingIntr = 0x%x\n", PendingIntr);
 
 	PendingIntr &= XCanPs_IntrGetEnabled(CanPtr);
-	printk("Enabled PendingIntr = 0x%x\n", PendingIntr);
 
 	/*
 	 * Clear all pending interrupts.
@@ -2226,4 +2248,4 @@ module_exit(xcanps_exit);
 
 MODULE_AUTHOR("ZhouPeng<zp_caams@163.com>");
 MODULE_DESCRIPTION("Xilinx PS CAN bus driver");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v3");
